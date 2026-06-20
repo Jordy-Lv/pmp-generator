@@ -72,18 +72,6 @@ from rich.text import Text
 
 console = Console()
 
-# Capa OPCIONAL de IA (DeepSeek), en su propio módulo. Si no está disponible o
-# falla al importar, la herramienta funciona igual sin IA.
-try:
-    import pmp_ia
-except Exception:
-    pmp_ia = None
-
-
-def _ia_on(cfg: dict) -> bool:
-    """True solo si el módulo de IA cargó y hay key + IA habilitada en la config."""
-    return pmp_ia is not None and pmp_ia.ia_activa(cfg)
-
 
 # Estilo de los prompts de questionary (acento cian, coherente con el banner).
 QS = QStyle([
@@ -124,11 +112,6 @@ DEFAULT_CFG: dict = {
     ],
     "horario_tarde":   ["La Riviera (APP)", "La Riviera (DB)", "HOMI Oracle", "HOMI SQLServer / MySQL"],
     "clientes_largos": ["HOMI Oracle", "HOMI SQLServer / MySQL"],
-    # ── IA opcional (DeepSeek). Vacía = desactivada; la configura el responsable. ──
-    "deepseek_api_key":        "",
-    "deepseek_model":          "deepseek-v4-flash",
-    "ia_habilitada":           True,
-    "ia_clasificar_clientes":  True,   # envía solo el nombre del cliente (ver pmp_ia.py)
 }
 
 
@@ -197,107 +180,6 @@ def calcular_dispo_fallback(lunes: date, cfg: dict) -> str:
         base = date.fromisoformat(DEFAULT_CFG["fecha_base_n2"])
     idx = ((lunes - base).days // 7) % len(orden)
     return orden[idx]
-
-
-def leer_asignaciones(lunes: date, ruta: str, rotacion: List[str]) -> Dict[str, List[str]]:
-    """Pestaña '2026' del PMP: clientes por ingeniero en la semana dada."""
-    from openpyxl import load_workbook
-    asig: Dict[str, List[str]] = {ing: [] for ing in rotacion}
-    set_rotacion = set(rotacion)
-    ignorar = {"", "-", "FESTIVO", "HORA DE ENVIO", *set_rotacion}
-    wb = load_workbook(ruta, data_only=True)
-    ws = wb["2026"]
-    header_row = None
-    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
-        if len(row) > 3 and hasattr(row[3], "date") and row[3].date() == lunes:
-            header_row = i
-            break
-    if not header_row:
-        return asig
-    for i in range(header_row + 1, header_row + 40):
-        col_d = ws.cell(i, 4).value
-        col_b = ws.cell(i, 2).value
-        if hasattr(col_d, "date"):
-            break
-        if col_b in set_rotacion:
-            # ponytail: la hoja pone FESTIVO/vacío en lunes; D:K cubre la semana sin mapear toda la plantilla.
-            for celda in range(4, 12):
-                valor = ws.cell(i, celda).value
-                if hasattr(valor, "date"):
-                    continue
-                cliente = str(valor).strip() if valor is not None else ""
-                if cliente and cliente not in ignorar and cliente not in asig[col_b]:
-                    asig[col_b].append(cliente)
-    return asig
-
-
-def _hoja_probable(wb):
-    """La hoja con la tabla semanal: '2026' si existe; si no, la que más fechas
-    tenga (usado solo en el fallback de IA, cuando el formato cambió)."""
-    if "2026" in wb.sheetnames:
-        return wb["2026"]
-    mejor, score = None, -1
-    for ws in wb.worksheets:
-        n = sum(1 for row in ws.iter_rows(max_row=min(ws.max_row, 60))
-                for c in row if hasattr(c.value, "date"))
-        if n > score:
-            mejor, score = ws, n
-    return mejor
-
-
-def leer_asignaciones_resiliente(lunes_act: date, ruta_pmp: str, cfg: dict):
-    """Lee las asignaciones. Si la lectura exacta no encuentra nada Y la IA está
-    activa, pide a DeepSeek que interprete la estructura del Excel (fallback que
-    no envía nombres reales). Devuelve (asignaciones, nota|None)."""
-    try:
-        asig = leer_asignaciones(lunes_act, ruta_pmp, cfg["rotacion_pmp"])
-    except Exception:
-        asig = {ing: [] for ing in cfg["rotacion_pmp"]}
-    if any(asig.values()) or not _ia_on(cfg):
-        return asig, None
-    try:
-        from openpyxl import load_workbook
-        ws = _hoja_probable(load_workbook(ruta_pmp, data_only=True))
-        mapa = pmp_ia.mapear_estructura(cfg, ws) if ws is not None else None
-        if not mapa:
-            return asig, None
-        asig2 = pmp_ia.leer_asignaciones_con_mapeo(ws, mapa, cfg["rotacion_pmp"])
-    except Exception:
-        return asig, None
-    if any(asig2.values()):
-        return asig2, "estructura interpretada por IA — revisa la vista previa"
-    return asig, None
-
-
-def clasificar_clientes_nuevos(cfg: dict, clientes: List[str]) -> List[str]:
-    """Para clientes aún no clasificados, pide a la IA su horario / si es PMP largo
-    y, si el usuario acepta, los añade a la config. Devuelve los nombres añadidos.
-    Privacidad: clasificar_cliente envía solo el nombre del cliente (ver pmp_ia)."""
-    if not _ia_on(cfg):
-        return []
-    conocidos = set(cfg.get("horario_tarde", [])) | set(cfg.get("clientes_largos", []))
-    nuevos = [c for c in dict.fromkeys(clientes) if c and c not in conocidos]
-    if not nuevos or not confirmar(
-            f"¿Clasificar {len(nuevos)} cliente(s) nuevo(s) con IA (horario / PMP largo)?",
-            default=False):
-        return []
-    with console.status("[cyan]Consultando IA…", spinner="dots"):
-        sugerencias = {c: pmp_ia.clasificar_cliente(cfg, c) for c in nuevos}
-    cambios: List[str] = []
-    for c, s in sugerencias.items():
-        if not s:
-            continue
-        etiquetas = ([f"horario {s['horario']}"] +
-                     (["PMP largo"] if s["pmp_largo"] else []))
-        if confirmar(f"  «{c}» → {', '.join(etiquetas)}.  ¿Añadir a la config?", default=True):
-            if s["horario"] == "tarde" and c not in cfg["horario_tarde"]:
-                cfg["horario_tarde"].append(c)
-            if s["pmp_largo"] and c not in cfg["clientes_largos"]:
-                cfg["clientes_largos"].append(c)
-            cambios.append(c)
-    if cambios:
-        guardar_cfg(cfg)
-    return cambios
 
 
 def siguiente_disponible(nombre: str, rotacion: List[str], ausentes: List[str]) -> str:
@@ -1181,9 +1063,6 @@ def modo_pmp(cfg: dict) -> None:
         console.print(f"  [yellow]⚠[/] Clientes no ubicados esa semana: "
                       f"{', '.join(faltantes)} — revísalo en la vista previa.")
 
-    # 4b · Clasificar clientes nuevos con IA (opcional, pregunta antes)
-    clasificar_clientes_nuevos(cfg, [c for cs in actuales.values() for c in cs])
-
     # 4c · Rotar (regla determinista) + disponibilidad
     nuevas = rotar(actuales, ausentes, cfg["rotacion_pmp"])
     n2 = n3 = None
@@ -1205,17 +1084,6 @@ def modo_pmp(cfg: dict) -> None:
             ref.append(f"  {ing}: ", style="dim")
             ref.append(", ".join(cls) + "\n")
     console.print(ref)
-
-    # 4d · Revisión de anomalías con IA (opcional, anonimizada)
-    if _ia_on(cfg):
-        with console.status("[magenta]Revisando anomalías con IA…", spinner="dots"):
-            anomalias = pmp_ia.revisar_anomalias(cfg, actuales, nuevas, ausentes)
-        if anomalias:
-            cuerpo = Text()
-            for a in anomalias:
-                cuerpo.append(f"  • {a}\n", style="yellow")
-            console.print(Panel(cuerpo, title="🤖  Posibles anomalías — revisar antes de generar",
-                                border_style="yellow", box=box.ROUNDED, expand=False, padding=(0, 2)))
 
     # 5 · PREVIEW + confirmación
     console.print(tabla_preview(lunes_sig, nuevas, ausentes, n2, n3, fuente_dispo, cfg))
@@ -1279,22 +1147,6 @@ def modo_pmp(cfg: dict) -> None:
     if resumen and confirmar("¿Abrir también el cuadro resumen?", default=False):
         abrir_archivo(resumen)
 
-    # 8 · Aviso para el equipo redactado por IA (opcional, anonimizado)
-    if _ia_on(cfg) and confirmar("¿Redactar un aviso para el equipo con IA?", default=False):
-        with console.status("[magenta]Redactando aviso con IA…", spinner="dots"):
-            aviso = pmp_ia.redactar_aviso(cfg, lunes_sig, nuevas, ausentes, n2, n3)
-        if aviso:
-            console.print(Panel(aviso, title="🤖  Aviso para el equipo (revísalo antes de enviar)",
-                                border_style="magenta", box=box.ROUNDED, expand=False, padding=(1, 2)))
-            ruta_aviso = Path(dir_destino) / f"Aviso_PMP_{lunes_sig.strftime('%Y%m%d')}.txt"
-            try:
-                ruta_aviso.write_text(aviso, encoding="utf-8")
-                console.print(f"  [green]✓[/] Guardado en [cyan]{ruta_aviso}[/]\n")
-            except Exception:
-                pass
-        else:
-            console.print("  [yellow]⚠[/] La IA no devolvió un aviso (revisa conexión / key).\n")
-
 
 def modo_config(cfg: dict) -> None:
     console.print(Panel(f"⚙  Configuración de rutas\n[dim]Se guardan en {CONFIG_PATH}[/]",
@@ -1321,40 +1173,8 @@ def modo_config(cfg: dict) -> None:
 
     _editar("ruta_pmp", "Control de Gestión PMP", "PMP", True)
     _editar("ruta_matriz", "Matriz Unificada", "Matriz", False)
-    _configurar_ia(cfg)
     guardar_cfg(cfg)
     console.print("  [green]✓[/] Configuración guardada.")
-
-
-def _configurar_ia(cfg: dict) -> None:
-    """Configura la IA (DeepSeek): pegar la API key y activar/desactivar. Opcional;
-    sin key la herramienta funciona igual con la rotación determinista."""
-    if pmp_ia is None:
-        return
-    tiene_key = bool((cfg.get("deepseek_api_key") or "").strip())
-    estado = "[green]activada[/]" if _ia_on(cfg) else (
-        "[yellow]con key pero desactivada[/]" if tiene_key else "[dim]sin configurar[/]")
-    console.print(f"\n  Asistente IA (DeepSeek): {estado}")
-    accion = _ask(questionary.select(
-        "Asistente IA — ¿qué hacer?",
-        choices=[
-            questionary.Choice("Pegar / cambiar la API key", "key"),
-            questionary.Choice("Activar IA" if not cfg.get("ia_habilitada", True) else "Desactivar IA", "toggle"),
-            questionary.Choice("Quitar la API key", "borrar"),
-            questionary.Choice("Dejar como está", "skip"),
-        ], style=QS))
-    if accion == "key":
-        nueva = _ask(questionary.password("Pega la API key de DeepSeek:", style=QS)).strip()
-        if nueva:
-            cfg["deepseek_api_key"] = nueva
-            cfg["ia_habilitada"] = True
-            console.print("  [green]✓[/] Key guardada. IA activada.")
-    elif accion == "toggle":
-        cfg["ia_habilitada"] = not cfg.get("ia_habilitada", True)
-        console.print(f"  [green]✓[/] IA {'activada' if cfg['ia_habilitada'] else 'desactivada'}.")
-    elif accion == "borrar":
-        cfg["deepseek_api_key"] = ""
-        console.print("  [green]✓[/] Key eliminada.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1370,8 +1190,7 @@ def menu(cfg: dict) -> None:
 
         rutas_ok = bool(cfg.get("ruta_pmp") and Path(cfg["ruta_pmp"]).is_file())
         estado = "[green]rutas OK ✓[/]" if rutas_ok else "[yellow]configura rutas ⚠[/]"
-        ia_estado = "  ·  [magenta]IA ✓[/]" if _ia_on(cfg) else ""
-        console.print(f"  Estado: {estado}{ia_estado}\n")
+        console.print(f"  Estado: {estado}\n")
 
         try:
             op = questionary.select(
@@ -1539,10 +1358,6 @@ def _selftest() -> None:
         assert ws2.cell(29, 12).value is None
         assert ws2.cell(29, 5).value == "D1 Oracle"
 
-    # La capa de IA debe viajar con la app (también dentro del binario empaquetado).
-    assert pmp_ia is not None, "pmp_ia no disponible (¿faltó en el empaquetado?)"
-    pmp_ia._selftest()
-    print("IA embebida:", "sí" if _ia_on(DEFAULT_CFG) else "no")
     print("self-test ok")
 
 

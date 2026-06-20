@@ -7,9 +7,8 @@ __pycache__/
 # Entorno virtual de desarrollo
 .venv/
 
-# Config / key locales — nunca deben commitearse
+# Config local — nunca debe commitearse
 .pmp_celula3.json
-pmp_key.py
 
 # Artefactos de empaquetado (PyInstaller)
 build/

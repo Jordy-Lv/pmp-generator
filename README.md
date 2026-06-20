@@ -96,52 +96,6 @@ python3 pmp_generator.py --self-test   # pruebas rápidas
 
 ---
 
-## Asistente IA (opcional · DeepSeek)
-
-La herramienta funciona **100 % sin IA**: la rotación y las fechas son siempre
-código determinista (`siguiente_disponible`, `siguiente_lunes…`), exacto y sin
-internet. La IA es una capa **opcional** (módulo [`pmp_ia.py`](pmp_ia.py)) que
-solo asiste en lo difícil de forma determinista:
-
-1. **Leer Excel desordenados** — si la lectura exacta no encuentra la tabla
-   (cambió la pestaña, las columnas o el formato), DeepSeek interpreta la
-   estructura como último recurso.
-2. **Clasificar clientes nuevos** — sugiere horario (mañana/tarde) y si es "PMP
-   largo" para clientes que aún no están en la config.
-3. **Redactar el aviso para el equipo** — una nota lista para Teams/correo.
-4. **Revisar anomalías** — avisa de cosas raras antes de generar (alguien con
-   demasiados clientes, un cliente que desaparece, etc.).
-
-**Privacidad — anonimización.** Antes de enviar nada a DeepSeek, los nombres
-reales de consultores y clientes se reemplazan por códigos (`Consultor A`,
-`Cliente 1`) y se reconstruyen al recibir la respuesta. Los nombres reales no
-salen del equipo. **Única excepción:** la clasificación de clientes envía solo el
-nombre del cliente aislado (sin consultores ni asignaciones), porque clasificarlo
-lo requiere; se puede apagar con `ia_clasificar_clientes = false`.
-
-**Robustez.** Sin API key, sin internet o ante cualquier error, todas las
-funciones de IA se omiten en silencio y el flujo determinista continúa igual.
-
-**Key embebida (nadie la configura).** La key de DeepSeek viaja **dentro del
-ejecutable** mediante el archivo `pmp_key.py` (NO versionado, ver `.gitignore`),
-así la compañera abre la app y la IA ya funciona. Cómo se rellena:
-
-- **Build local** (`build.sh`/`build.ps1`): se usa el `pmp_key.py` que tengas en
-  el equipo de desarrollo.
-- **CI**: el workflow lo genera desde el *secret* `DEEPSEEK_API_KEY`
-  (GitHub → Settings → Secrets and variables → Actions). Sin el secret, el binario
-  se construye igual pero sin IA.
-
-Quien quiera puede **sobrescribir** la key o desactivar la IA desde el menú
-**⚙ Configurar rutas → Asistente IA** (se guarda en `~/.pmp_celula3.json`).
-Modelo por defecto: `deepseek-v4-flash`, sin "thinking" (respuestas directas;
-céntimos al mes para este volumen).
-
-> **Seguridad:** una key embebida es extraíble del binario por quien lo tenga.
-> Para uso interno suele bastar; conviene ponerle a la cuenta DeepSeek un
-> **límite de gasto** y rotar la key si se filtra (basta regenerar `pmp_key.py` /
-> el secret y reconstruir).
-
 ## Configuración (`~/.pmp_celula3.json`)
 
 | Clave | Significado |
@@ -153,7 +107,3 @@ céntimos al mes para este volumen).
 | `rotacion_n3` | Orden de respaldo de escalamiento N3. |
 | `horario_tarde` | Clientes que se atienden en jornada de tarde. |
 | `clientes_largos` | Clientes marcados como "PMP largo". |
-| `deepseek_api_key` | Clave de DeepSeek (vacía = IA desactivada). |
-| `deepseek_model` | Modelo a usar (por defecto `deepseek-v4-flash`). |
-| `ia_habilitada` | Activa/desactiva la IA aunque haya key. |
-| `ia_clasificar_clientes` | Permite enviar el nombre del cliente para clasificarlo. |

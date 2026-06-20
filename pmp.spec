@@ -9,7 +9,6 @@ autocontenido (incluye Python y todas las dependencias).
 El mismo spec sirve en ambos sistemas; PyInstaller NO cross-compila, así que el
 .exe se construye en Windows y el binario de Mac en macOS (ver build.yml / CI).
 """
-import os
 import sys
 from PyInstaller.utils.hooks import collect_all
 
@@ -28,8 +27,7 @@ a = Analysis(
     pathex=[],
     binaries=_binaries,
     datas=_datas,
-    # capa de IA + key embebida (pmp_key solo si existe: build sin key no falla)
-    hiddenimports=_hidden + ["pmp_ia"] + (["pmp_key"] if os.path.exists("pmp_key.py") else []),
+    hiddenimports=_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

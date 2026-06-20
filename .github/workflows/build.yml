@@ -37,21 +37,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-build.txt
 
-      # Embebe la key de DeepSeek en el binario sin que viaje en el repo: se toma
-      # del secret DEEPSEEK_API_KEY (Settings → Secrets → Actions). Si no está, el
-      # binario se construye igual pero sin IA (la herramienta funciona).
-      - name: Inyectar key embebida desde secret
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        shell: bash
-        run: |
-          if [ -n "$DEEPSEEK_API_KEY" ]; then
-            python -c "import os; open('pmp_key.py','w',encoding='utf-8').write('DEEPSEEK_API_KEY = ' + repr(os.environ['DEEPSEEK_API_KEY']) + '\n')"
-            echo "Key embebida: sí"
-          else
-            echo "Key embebida: no (define el secret DEEPSEEK_API_KEY para activar la IA)"
-          fi
-
       - name: Construir ejecutable
         run: pyinstaller --clean --noconfirm pmp.spec
 

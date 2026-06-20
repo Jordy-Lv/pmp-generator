@@ -74,23 +74,7 @@ Los archivos originales **no se modifican**. Al terminar, la herramienta te
 ofrece abrir el Control actualizado para que lo revises antes de subirlo a
 SharePoint.
 
----
-
-## 4. El asistente (si está activado)
-
-Si quien te entregó la herramienta activó el asistente, durante el paso de generar
-verás algunas ayudas automáticas:
-
-- Un aviso si algo se ve **raro** (por ejemplo, alguien con demasiados clientes).
-- La opción de **clasificar clientes nuevos** (mañana/tarde) — solo si tú aceptas.
-- La opción de **redactar un aviso para el equipo**, listo para copiar a Teams o
-  correo (se guarda también como `Aviso_PMP_...txt` junto a los demás archivos).
-
-No tienes que configurar nada: si te preguntan, respondes con Enter/flechas como
-en el resto. Y si no está activado, simplemente no aparece — la herramienta hace
-su trabajo igual.
-
-## 5. Si algo no sale bien
+## 4. Si algo no sale bien
 
 - **No encuentra los Excel**: entra a **⚙ Configurar rutas de archivos** y
   selecciona los archivos a mano. Quedan recordados para la próxima vez.
