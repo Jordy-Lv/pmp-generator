@@ -1,0 +1,98 @@
+name: build
+
+# Construye el ejecutable para Windows y macOS (Apple Silicon e Intel) y, al
+# publicar un tag «vX.Y.Z», adjunta los .zip a la Release de GitHub.
+#   - Disparo automático: al hacer push de un tag que empiece por «v».
+#   - Disparo manual: botón «Run workflow» (no crea Release, solo artefactos).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write          # necesario para crear la Release
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            nombre: PMP-Windows
+          - os: macos-latest          # Apple Silicon (arm64)
+            nombre: PMP-macOS-AppleSilicon
+          - os: macos-13              # Intel (x86_64)
+            nombre: PMP-macOS-Intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-build.txt
+
+      # Embebe la key de DeepSeek en el binario sin que viaje en el repo: se toma
+      # del secret DEEPSEEK_API_KEY (Settings → Secrets → Actions). Si no está, el
+      # binario se construye igual pero sin IA (la herramienta funciona).
+      - name: Inyectar key embebida desde secret
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        shell: bash
+        run: |
+          if [ -n "$DEEPSEEK_API_KEY" ]; then
+            python -c "import os; open('pmp_key.py','w',encoding='utf-8').write('DEEPSEEK_API_KEY = ' + repr(os.environ['DEEPSEEK_API_KEY']) + '\n')"
+            echo "Key embebida: sí"
+          else
+            echo "Key embebida: no (define el secret DEEPSEEK_API_KEY para activar la IA)"
+          fi
+
+      - name: Construir ejecutable
+        run: pyinstaller --clean --noconfirm pmp.spec
+
+      # Ejecuta el self-test DENTRO del binario congelado: valida que openpyxl
+      # guarda un Excel y que questionary/rich importan correctamente empaquetados.
+      - name: Probar binario (Windows)
+        if: runner.os == 'Windows'
+        run: dist\PMP.exe --self-test
+
+      - name: Probar binario (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          chmod +x dist/pmp
+          ./dist/pmp --self-test
+
+      - name: Empaquetar (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist\PMP.exe -DestinationPath ${{ matrix.nombre }}.zip
+
+      - name: Empaquetar (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cp scripts/Lanzar_PMP.command dist/
+          chmod +x dist/pmp dist/Lanzar_PMP.command
+          cd dist && zip -r "../${{ matrix.nombre }}.zip" pmp Lanzar_PMP.command
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.nombre }}
+          path: ${{ matrix.nombre }}.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.zip

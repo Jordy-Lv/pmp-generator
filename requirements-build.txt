@@ -1,0 +1,4 @@
+# Dependencia SOLO para construir el ejecutable (no la necesita quien corre el
+# script suelto). CI y los scripts build.sh / build.ps1 instalan esto además de
+# requirements.txt.
+pyinstaller>=6.0

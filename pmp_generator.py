@@ -30,6 +30,10 @@ def _faltantes() -> List[str]:
 
 
 def _bootstrap_dependencias() -> None:
+    # En el ejecutable empaquetado (PyInstaller) las dependencias ya van dentro:
+    # no hay pip que invocar ni intérprete que relanzar, así que se omite.
+    if getattr(sys, "frozen", False):
+        return
     falt = _faltantes()
     if not falt:
         return
@@ -63,11 +67,23 @@ from questionary import Style as QStyle
 from rich import box
 from rich.console import Console, Group
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
 console = Console()
+
+# Capa OPCIONAL de IA (DeepSeek), en su propio módulo. Si no está disponible o
+# falla al importar, la herramienta funciona igual sin IA.
+try:
+    import pmp_ia
+except Exception:
+    pmp_ia = None
+
+
+def _ia_on(cfg: dict) -> bool:
+    """True solo si el módulo de IA cargó y hay key + IA habilitada en la config."""
+    return pmp_ia is not None and pmp_ia.ia_activa(cfg)
+
 
 # Estilo de los prompts de questionary (acento cian, coherente con el banner).
 QS = QStyle([
@@ -98,6 +114,11 @@ DEFAULT_CFG: dict = {
     "rotacion_n3":     ["Carlos Barrera", "Santiago Amaya", "Adriano Carreño"],
     "horario_tarde":   ["La Riviera (APP)", "La Riviera (DB)", "HOMI Oracle", "HOMI SQLServer / MySQL"],
     "clientes_largos": ["HOMI Oracle", "HOMI SQLServer / MySQL"],
+    # ── IA opcional (DeepSeek). Vacía = desactivada; la configura el responsable. ──
+    "deepseek_api_key":        "",
+    "deepseek_model":          "deepseek-v4-flash",
+    "ia_habilitada":           True,
+    "ia_clasificar_clientes":  True,   # envía solo el nombre del cliente (ver pmp_ia.py)
 }
 
 
@@ -200,20 +221,101 @@ def leer_asignaciones(lunes: date, ruta: str, rotacion: List[str]) -> Dict[str, 
     return asig
 
 
+def _hoja_probable(wb):
+    """La hoja con la tabla semanal: '2026' si existe; si no, la que más fechas
+    tenga (usado solo en el fallback de IA, cuando el formato cambió)."""
+    if "2026" in wb.sheetnames:
+        return wb["2026"]
+    mejor, score = None, -1
+    for ws in wb.worksheets:
+        n = sum(1 for row in ws.iter_rows(max_row=min(ws.max_row, 60))
+                for c in row if hasattr(c.value, "date"))
+        if n > score:
+            mejor, score = ws, n
+    return mejor
+
+
+def leer_asignaciones_resiliente(lunes_act: date, ruta_pmp: str, cfg: dict):
+    """Lee las asignaciones. Si la lectura exacta no encuentra nada Y la IA está
+    activa, pide a DeepSeek que interprete la estructura del Excel (fallback que
+    no envía nombres reales). Devuelve (asignaciones, nota|None)."""
+    try:
+        asig = leer_asignaciones(lunes_act, ruta_pmp, cfg["rotacion_pmp"])
+    except Exception:
+        asig = {ing: [] for ing in cfg["rotacion_pmp"]}
+    if any(asig.values()) or not _ia_on(cfg):
+        return asig, None
+    try:
+        from openpyxl import load_workbook
+        ws = _hoja_probable(load_workbook(ruta_pmp, data_only=True))
+        mapa = pmp_ia.mapear_estructura(cfg, ws) if ws is not None else None
+        if not mapa:
+            return asig, None
+        asig2 = pmp_ia.leer_asignaciones_con_mapeo(ws, mapa, cfg["rotacion_pmp"])
+    except Exception:
+        return asig, None
+    if any(asig2.values()):
+        return asig2, "estructura interpretada por IA — revisa la vista previa"
+    return asig, None
+
+
+def clasificar_clientes_nuevos(cfg: dict, clientes: List[str]) -> List[str]:
+    """Para clientes aún no clasificados, pide a la IA su horario / si es PMP largo
+    y, si el usuario acepta, los añade a la config. Devuelve los nombres añadidos.
+    Privacidad: clasificar_cliente envía solo el nombre del cliente (ver pmp_ia)."""
+    if not _ia_on(cfg):
+        return []
+    conocidos = set(cfg.get("horario_tarde", [])) | set(cfg.get("clientes_largos", []))
+    nuevos = [c for c in dict.fromkeys(clientes) if c and c not in conocidos]
+    if not nuevos or not confirmar(
+            f"¿Clasificar {len(nuevos)} cliente(s) nuevo(s) con IA (horario / PMP largo)?",
+            default=False):
+        return []
+    with console.status("[cyan]Consultando IA…", spinner="dots"):
+        sugerencias = {c: pmp_ia.clasificar_cliente(cfg, c) for c in nuevos}
+    cambios: List[str] = []
+    for c, s in sugerencias.items():
+        if not s:
+            continue
+        etiquetas = ([f"horario {s['horario']}"] +
+                     (["PMP largo"] if s["pmp_largo"] else []))
+        if confirmar(f"  «{c}» → {', '.join(etiquetas)}.  ¿Añadir a la config?", default=True):
+            if s["horario"] == "tarde" and c not in cfg["horario_tarde"]:
+                cfg["horario_tarde"].append(c)
+            if s["pmp_largo"] and c not in cfg["clientes_largos"]:
+                cfg["clientes_largos"].append(c)
+            cambios.append(c)
+    if cambios:
+        guardar_cfg(cfg)
+    return cambios
+
+
+def siguiente_disponible(nombre: str, rotacion: List[str], ausentes: List[str]) -> str:
+    """Siguiente consultor en la rotación que no esté ausente.
+
+    Es la ÚNICA regla de rotación del proyecto: la usan tanto `rotar()` (que mueve
+    las carteras en memoria para el cuadro resumen) como `actualizar_control_pmp()`
+    (que renombra los consultores dentro del Control real). Así ambos artefactos
+    rotan exactamente igual y nunca divergen. Sin ausentes equivale a "el siguiente".
+    """
+    if nombre not in rotacion:
+        return nombre
+    n = len(rotacion)
+    sig = (rotacion.index(nombre) + 1) % n
+    intentos = 0
+    while rotacion[sig] in ausentes and intentos < n:
+        sig = (sig + 1) % n
+        intentos += 1
+    return rotacion[sig]
+
+
 def rotar(actuales: Dict[str, List[str]], ausentes: List[str], rotacion: List[str]) -> Dict[str, List[str]]:
     """Mateo→Heiner→Estefania→Mateo. Si el destino está ausente, salta al siguiente."""
     nuevas: Dict[str, List[str]] = {ing: [] for ing in rotacion}
-    n = len(rotacion)
-    for idx, ing in enumerate(rotacion):
+    for ing in rotacion:
         clientes = actuales.get(ing, [])
-        if not clientes:
-            continue
-        sig_idx = (idx + 1) % n
-        intentos = 0
-        while rotacion[sig_idx] in ausentes and intentos < n:
-            sig_idx = (sig_idx + 1) % n
-            intentos += 1
-        nuevas[rotacion[sig_idx]].extend(clientes)
+        if clientes:
+            nuevas[siguiente_disponible(ing, rotacion, ausentes)].extend(clientes)
     return nuevas
 
 
@@ -232,12 +334,11 @@ def horario_predominante(clientes: List[str], cfg: dict) -> str:
 def generar_excel(lunes: date, asig: Dict[str, List[str]], n2: str, n3: Optional[str],
                   ausentes: List[str], cfg: dict, dir_destino: Path) -> str:
     """Genera el Excel formateado. Lo guarda en `dir_destino` (junto al PMP fuente)."""
-    from openpyxl import Workbook, load_workbook
+    from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
     rotacion      = cfg["rotacion_pmp"]
-    horario_tarde = set(cfg["horario_tarde"])
     largos        = set(cfg["clientes_largos"])
     dias          = [lunes + timedelta(i) for i in range(5)]
     dias_nom      = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]
@@ -582,6 +683,35 @@ def siguiente_lunes_en_pmp(ruta_pmp: str) -> Optional[date]:
     return max((lunes for _, lunes in headers), default=None) + timedelta(days=7) if headers else None
 
 
+def diagnostico_fecha(ruta_pmp: str, lunes_sig: date) -> Tuple[bool, Optional[str], Optional[date]]:
+    """Comprueba —sin escribir nada— si la semana pedida encaja en el Control.
+    Es determinista (no IA): la coherencia de fechas es una resta exacta.
+    Devuelve (ok, mensaje, sugerida), donde `sugerida` es la siguiente semana que
+    falta. ok=False si la semana ya existe o si no es la consecutiva esperada."""
+    try:
+        from openpyxl import load_workbook
+        ws = load_workbook(ruta_pmp, read_only=True, data_only=False)["2026"]
+        headers = _headers_semana_pmp(ws)
+    except Exception:
+        return True, None, None          # si no se puede leer, lo maneja el flujo normal
+    if not headers:
+        return True, None, None
+    fechas = {f for _, f in headers}
+    sugerida = max(fechas) + timedelta(days=7)
+    if lunes_sig in fechas:
+        return (False,
+                f"  [red]✗[/] La semana {lunes_sig.strftime('%d/%m/%Y')} ya está en el Control "
+                f"(esa tabla ya se creó). La siguiente que falta es "
+                f"[cyan]{sugerida.strftime('%d/%m/%Y')}[/].",
+                sugerida)
+    if lunes_sig != sugerida:
+        return (False,
+                f"  [yellow]⚠[/] Las semanas deben ir consecutivas: la siguiente esperada es "
+                f"[cyan]{sugerida.strftime('%d/%m/%Y')}[/], no {lunes_sig.strftime('%d/%m/%Y')}.",
+                sugerida)
+    return True, None, sugerida
+
+
 def _copiar_bloque(ws, fila_origen: int, fila_destino: int, alto: int = 21,
                   col_min: int = 1, col_max: int = 15) -> None:
     offset = fila_destino - fila_origen
@@ -612,12 +742,16 @@ def _copiar_bloque(ws, fila_origen: int, fila_destino: int, alto: int = 21,
             )
 
 
-def generar_bloque_pmp_en_control(ruta_pmp: str, lunes: date, cfg: dict,
-                                  salida: Optional[str] = None) -> str:
+def actualizar_control_pmp(ruta_pmp: str, lunes: date, ausentes: List[str], cfg: dict,
+                           salida: Optional[str] = None) -> str:
     """Copia el último bloque semanal del Control PMP debajo y rota Célula 3.
 
     No reconstruye la tabla: conserva el formato real de Excel y solo toca el
-    nuevo bloque copiado.
+    nuevo bloque copiado. La rotación de consultores usa `siguiente_disponible`,
+    la MISMA regla que `rotar()`, de modo que el Control actualizado coincide con
+    el cuadro resumen incluso cuando hay ausentes (el cliente del ausente queda a
+    cargo del siguiente disponible; el aviso visual "REASIGNAR" vive solo en el
+    cuadro resumen). Escribe siempre a una copia, nunca sobre el original.
     """
     from openpyxl import load_workbook
 
@@ -654,7 +788,7 @@ def generar_bloque_pmp_en_control(ruta_pmp: str, lunes: date, cfg: dict,
         for col in (2, 13):
             valor = ws.cell(row, col).value
             if valor in cfg["rotacion_pmp"]:
-                ws.cell(row, col).value = _siguiente_en_rotacion(valor, cfg["rotacion_pmp"])
+                ws.cell(row, col).value = siguiente_disponible(valor, cfg["rotacion_pmp"], ausentes)
 
     destino = salida or str(Path(ruta_pmp).with_name(
         f"{Path(ruta_pmp).stem}_actualizado_{lunes.strftime('%Y%m%d')}.xlsx"
@@ -732,402 +866,6 @@ def asegurar_dispo_en_matriz(ruta_matriz: str, inicio: date, cfg: dict,
     return destino
 
 
-def lanzar_gui(cfg: dict) -> None:
-    try:
-        import tkinter as tk
-        from tkinter import filedialog, messagebox, ttk
-    except Exception as e:
-        console.print(f"  [red]✗[/] No se pudo cargar tkinter: {e}")
-        return
-
-    class PMPApp(tk.Tk):
-        def __init__(self, cfg_: dict):
-            super().__init__()
-            self.cfg = cfg_
-            self.ultimo_archivo: Optional[str] = None
-            self.title("PMP Generator — Célula 3")
-            self.geometry("1120x740")
-            self.minsize(960, 640)
-            self.configure(bg="#f6f7f9")
-
-            style = ttk.Style(self)
-            if "clam" in style.theme_names():
-                style.theme_use("clam")
-            style.configure("TFrame", background="#f6f7f9")
-            style.configure("TLabel", background="#f6f7f9", font=("Avenir", 12))
-            style.configure("Title.TLabel", font=("Avenir", 24, "bold"), foreground="#991b1b")
-            style.configure("Hint.TLabel", font=("Avenir", 11), foreground="#64748b")
-            style.configure("TButton", font=("Avenir", 12), padding=(12, 8))
-            style.configure("Accent.TButton", background="#b91c1c", foreground="#ffffff")
-            style.configure("TLabelframe", background="#f6f7f9", padding=12)
-            style.configure("TLabelframe.Label", background="#f6f7f9", font=("Avenir", 13, "bold"))
-            style.configure("Treeview", rowheight=34, font=("Avenir", 11))
-            style.configure("Treeview.Heading", font=("Avenir", 11, "bold"))
-
-            self.pmp_var = tk.StringVar(value=self.cfg.get("ruta_pmp", ""))
-            self.matriz_var = tk.StringVar(value=self.cfg.get("ruta_matriz", ""))
-            lunes_default = None
-            if self.pmp_var.get() and Path(self.pmp_var.get()).is_file():
-                try:
-                    lunes_default = siguiente_lunes_en_pmp(self.pmp_var.get())
-                except Exception:
-                    lunes_default = None
-            self.fecha_var = tk.StringVar(value=(lunes_default or siguiente_lunes()).strftime("%d/%m/%Y"))
-            self.status_var = tk.StringVar(value="Listo.")
-            self.sugerencia_var = tk.StringVar(value="")
-            self.paso_var = tk.StringVar(value="")
-            self.ultimos_archivos: List[str] = []
-            self.ausente_vars = {
-                ing: tk.BooleanVar(value=False)
-                for ing in self.cfg["rotacion_pmp"]
-            }
-
-            self._build()
-            self._refrescar_sugerencia(usar_fecha=False)
-
-        def _build(self) -> None:
-            root = ttk.Frame(self, padding=18)
-            root.pack(fill="both", expand=True)
-            root.columnconfigure(0, weight=1)
-            root.rowconfigure(4, weight=1)
-
-            header = ttk.Frame(root)
-            header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
-            ttk.Label(header, text="PMP Generator", style="Title.TLabel").pack(anchor="w")
-            ttk.Label(
-                header,
-                text="Rotación semanal, disponibilidad nocturna y Excel listo para revisar.",
-                style="Hint.TLabel",
-            ).pack(anchor="w")
-
-            archivos = ttk.LabelFrame(root, text="1. Archivos Excel")
-            archivos.grid(row=1, column=0, sticky="ew", pady=(0, 12))
-            archivos.columnconfigure(1, weight=1)
-            self._fila_archivo(archivos, 0, "Control PMP", self.pmp_var, True)
-            self._fila_archivo(archivos, 1, "Matriz recursos", self.matriz_var, False)
-
-            estado = ttk.LabelFrame(root, text="2. Estado detectado")
-            estado.grid(row=2, column=0, sticky="ew", pady=(0, 12))
-            estado.columnconfigure(0, weight=1)
-            ttk.Label(estado, textvariable=self.sugerencia_var, style="Hint.TLabel").grid(
-                row=0, column=0, sticky="w"
-            )
-            ttk.Label(estado, textvariable=self.paso_var, style="Hint.TLabel").grid(
-                row=1, column=0, sticky="w", pady=(4, 0)
-            )
-
-            opciones = ttk.LabelFrame(root, text="3. Semana y ausentes")
-            opciones.grid(row=3, column=0, sticky="ew", pady=(0, 12))
-            opciones.columnconfigure(1, weight=1)
-            ttk.Label(opciones, text="Semana a crear").grid(row=0, column=0, sticky="w", padx=(0, 10))
-            ttk.Entry(opciones, textvariable=self.fecha_var, width=16, font=("Avenir", 12)).grid(
-                row=0, column=1, sticky="w"
-            )
-            ttk.Button(opciones, text="Usar sugerida", command=lambda: self._refrescar_sugerencia(True)).grid(
-                row=0, column=2, sticky="w", padx=(10, 0)
-            )
-            ttk.Label(opciones, text="DD/MM/AAAA", style="Hint.TLabel").grid(row=0, column=3, sticky="w", padx=10)
-
-            ausentes = ttk.Frame(opciones)
-            ausentes.grid(row=1, column=0, columnspan=4, sticky="w", pady=(12, 0))
-            ttk.Label(ausentes, text="Ausentes").pack(side="left", padx=(0, 12))
-            for ing in self.cfg["rotacion_pmp"]:
-                ttk.Checkbutton(ausentes, text=ing, variable=self.ausente_vars[ing]).pack(side="left", padx=(0, 14))
-
-            acciones = ttk.Frame(root)
-            acciones.grid(row=4, column=0, sticky="nsew")
-            acciones.columnconfigure(0, weight=1)
-            acciones.rowconfigure(1, weight=1)
-
-            botones = ttk.Frame(acciones)
-            botones.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-            ttk.Button(botones, text="Previsualizar rotación", command=self.mostrar_preview).pack(side="left", padx=(0, 8))
-            ttk.Button(botones, text="Crear siguiente semana", style="Accent.TButton", command=self.generar).pack(side="left", padx=(0, 8))
-            ttk.Button(botones, text="Ver disponibilidad", command=self.consultar_dispo).pack(side="left", padx=(0, 8))
-            self.abrir_btn = ttk.Button(botones, text="Abrir último Control", command=self.abrir_ultimo, state="disabled")
-            self.abrir_btn.pack(side="left")
-
-            preview = ttk.LabelFrame(acciones, text="4. Vista previa")
-            preview.grid(row=1, column=0, sticky="nsew")
-            preview.columnconfigure(0, weight=1)
-            preview.rowconfigure(0, weight=1)
-
-            cols = ("ingeniero", "horario", "clientes")
-            self.tree = ttk.Treeview(preview, columns=cols, show="headings", height=6)
-            self.tree.heading("ingeniero", text="Ingeniero")
-            self.tree.heading("horario", text="Horario")
-            self.tree.heading("clientes", text="Clientes")
-            self.tree.column("ingeniero", width=190, anchor="w")
-            self.tree.column("horario", width=160, anchor="center")
-            self.tree.column("clientes", width=560, anchor="w")
-            self.tree.tag_configure("ausente", background="#fee2e2", foreground="#991b1b")
-            self.tree.grid(row=0, column=0, sticky="nsew")
-            scrollbar = ttk.Scrollbar(preview, orient="vertical", command=self.tree.yview)
-            scrollbar.grid(row=0, column=1, sticky="ns")
-            self.tree.configure(yscrollcommand=scrollbar.set)
-
-            self.detalles = tk.Text(preview, height=8, wrap="word", font=("Avenir", 12), bg="#ffffff", relief="flat")
-            self.detalles.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-            self._set_detalles(
-                "1. Selecciona el Control PMP.\n"
-                "2. Usa la fecha sugerida.\n"
-                "3. Previsualiza la rotación.\n"
-                "4. Crea la copia actualizada."
-            )
-
-            status = ttk.Label(root, textvariable=self.status_var, style="Hint.TLabel")
-            status.grid(row=4, column=0, sticky="ew", pady=(10, 0))
-
-        def _fila_archivo(self, parent, row: int, label: str, var, requerido: bool) -> None:
-            ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=5)
-            ttk.Entry(parent, textvariable=var, font=("Avenir", 12)).grid(row=row, column=1, sticky="ew", pady=5)
-            ttk.Button(parent, text="Seleccionar", command=lambda: self.seleccionar_archivo(var, requerido)).grid(
-                row=row, column=2, sticky="e", padx=(10, 0), pady=5
-            )
-
-        def seleccionar_archivo(self, var, requerido: bool) -> None:
-            ruta = filedialog.askopenfilename(
-                title="Selecciona un archivo Excel",
-                filetypes=[("Excel", "*.xlsx"), ("Todos los archivos", "*.*")],
-            )
-            if ruta:
-                var.set(ruta)
-                if var is self.pmp_var:
-                    self._refrescar_sugerencia(usar_fecha=True)
-
-        def _refrescar_sugerencia(self, usar_fecha: bool = False) -> None:
-            ruta = self.pmp_var.get().strip()
-            if not ruta or not Path(ruta).is_file():
-                self.sugerencia_var.set("Selecciona el Control PMP para detectar la siguiente semana.")
-                self.paso_var.set("")
-                return
-            try:
-                sugerida = siguiente_lunes_en_pmp(ruta)
-            except Exception as e:
-                self.sugerencia_var.set(f"No pude leer el Control PMP: {e}")
-                self.paso_var.set("")
-                return
-            if not sugerida:
-                self.sugerencia_var.set("No encontré bloques semanales en el Control PMP.")
-                self.paso_var.set("")
-                return
-            ultima = sugerida - timedelta(days=7)
-            dispo_ini = sugerida - timedelta(days=3)
-            dispo_fin = dispo_ini + timedelta(days=7)
-            self.sugerencia_var.set(
-                f"Último bloque: {ultima.strftime('%d/%m/%Y')} · Siguiente sugerida: {sugerida.strftime('%d/%m/%Y')}"
-            )
-            self.paso_var.set(
-                f"Se creará una copia con PMP {sugerida.strftime('%d/%m/%Y')}→"
-                f"{(sugerida + timedelta(days=4)).strftime('%d/%m/%Y')} y dispo "
-                f"{dispo_ini.strftime('%d/%m/%Y')}→{dispo_fin.strftime('%d/%m/%Y')}."
-            )
-            if usar_fecha:
-                self.fecha_var.set(sugerida.strftime("%d/%m/%Y"))
-
-        def _set_detalles(self, texto: str) -> None:
-            self.detalles.configure(state="normal")
-            self.detalles.delete("1.0", "end")
-            self.detalles.insert("1.0", texto)
-            self.detalles.configure(state="disabled")
-
-        def _status(self, texto: str) -> None:
-            self.status_var.set(texto)
-            self.update_idletasks()
-
-        def _ruta(self, var, nombre: str, requerido: bool) -> Optional[str]:
-            raw = var.get().strip()
-            if not raw:
-                if requerido:
-                    raise ValueError(f"Selecciona el archivo de {nombre}.")
-                return None
-            ruta = Path(raw).expanduser()
-            if not ruta.is_file() or ruta.suffix.lower() != ".xlsx":
-                raise ValueError(f"{nombre} no es un .xlsx válido.")
-            return str(ruta.resolve())
-
-        def _guardar_rutas(self, ruta_pmp: str, ruta_matriz: Optional[str]) -> None:
-            self.cfg["ruta_pmp"] = ruta_pmp
-            self.cfg["ruta_matriz"] = ruta_matriz or ""
-            guardar_cfg(self.cfg)
-
-        def _dispo(self, lunes: date, ruta_matriz: Optional[str]) -> Tuple[str, Optional[str], str, Optional[str]]:
-            n2 = n3 = None
-            aviso = None
-            fuente = "cálculo automático"
-            if ruta_matriz:
-                try:
-                    n2, n3 = leer_dispo(lunes, ruta_matriz)
-                    if n2:
-                        fuente = "Matriz Unificada"
-                except Exception as e:
-                    aviso = f"No se pudo leer la Matriz: {e}"
-            if not n2:
-                n2 = calcular_dispo_fallback(lunes, self.cfg)
-            return n2, n3, fuente, aviso
-
-        def _payload(self) -> dict:
-            lunes_sig = parse_fecha(self.fecha_var.get())
-            lunes_act = lunes_sig - timedelta(weeks=1)
-            ruta_pmp = self._ruta(self.pmp_var, "Control PMP", True)
-            ruta_matriz = self._ruta(self.matriz_var, "Matriz recursos", False)
-            assert ruta_pmp is not None
-            self._guardar_rutas(ruta_pmp, ruta_matriz)
-
-            ausentes = [ing for ing, var in self.ausente_vars.items() if var.get()]
-            self._status("Leyendo asignaciones actuales...")
-            actuales = leer_asignaciones(lunes_act, ruta_pmp, self.cfg["rotacion_pmp"])
-            if all(not v for v in actuales.values()):
-                esperada = siguiente_lunes_en_pmp(ruta_pmp)
-                if esperada and lunes_sig > esperada:
-                    ultima = esperada - timedelta(days=7)
-                    raise ValueError(
-                        f"El archivo seleccionado solo llega hasta {ultima.strftime('%d/%m/%Y')}.\n\n"
-                        f"Para generar {lunes_sig.strftime('%d/%m/%Y')} necesitas que el Control ya tenga "
-                        f"la semana {lunes_act.strftime('%d/%m/%Y')}.\n\n"
-                        f"Primero genera {esperada.strftime('%d/%m/%Y')} o selecciona la copia actualizada."
-                    )
-                raise ValueError(
-                    "No se hallaron clientes de Célula 3 para la semana "
-                    f"{lunes_act.strftime('%d/%m/%Y')} en el PMP."
-                )
-
-            self._status("Rotando clientes y consultando disponibilidad...")
-            nuevas = rotar(actuales, ausentes, self.cfg["rotacion_pmp"])
-            n2, n3, fuente, aviso = self._dispo(lunes_sig, ruta_matriz)
-            return {
-                "lunes_sig": lunes_sig,
-                "lunes_act": lunes_act,
-                "ruta_pmp": ruta_pmp,
-                "ruta_matriz": ruta_matriz,
-                "actuales": actuales,
-                "nuevas": nuevas,
-                "ausentes": ausentes,
-                "n2": n2,
-                "n3": n3,
-                "fuente": fuente,
-                "aviso": aviso,
-            }
-
-        def _mostrar_payload(self, data: dict) -> None:
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-
-            largos = set(self.cfg["clientes_largos"])
-            for ing in self.cfg["rotacion_pmp"]:
-                clientes = data["nuevas"].get(ing, [])
-                ausente = ing in data["ausentes"]
-                horario = "—" if ausente else horario_predominante(clientes, self.cfg)
-                clientes_txt = ", ".join(
-                    c + (" (PMP largo)" if c in largos else "")
-                    for c in clientes
-                ) or "(sin clientes)"
-                nombre = f"{ing} (ausente)" if ausente else ing
-                self.tree.insert("", "end", values=(nombre, horario, clientes_txt), tags=("ausente",) if ausente else ())
-
-            fin = data["lunes_sig"] + timedelta(days=4)
-            lineas = [
-                f"Semana a generar: {data['lunes_sig'].strftime('%d/%m/%Y')} → {fin.strftime('%d/%m/%Y')}",
-                f"Semana de referencia leída: {data['lunes_act'].strftime('%d/%m/%Y')}",
-                f"Dispo N2: {data['n2']} ({data['fuente']})",
-                f"Dispo N3: {data['n3'] or 'N/A'}",
-                f"Ausentes: {', '.join(data['ausentes']) or 'Ninguno'}",
-            ]
-            if data["aviso"]:
-                lineas.append("")
-                lineas.append(data["aviso"])
-            lineas.append("")
-            for ing, clientes in data["actuales"].items():
-                if clientes:
-                    lineas.append(f"{ing}: {', '.join(clientes)}")
-            self._set_detalles("\n".join(lineas))
-
-        def mostrar_preview(self) -> Optional[dict]:
-            try:
-                data = self._payload()
-                self._mostrar_payload(data)
-                self._status("Vista previa lista.")
-                return data
-            except Exception as e:
-                self._status("Revisa los datos e intenta de nuevo.")
-                messagebox.showerror("No se pudo preparar la vista previa", str(e))
-                return None
-
-        def generar(self) -> None:
-            data = self.mostrar_preview()
-            if not data:
-                return
-            if not messagebox.askyesno(
-                "Actualizar copias",
-                "¿Crear copias actualizadas con el nuevo bloque PMP y la disponibilidad?",
-            ):
-                self._status("Generación cancelada.")
-                return
-            try:
-                self._status("Actualizando copias...")
-                control = generar_bloque_pmp_en_control(
-                    data["ruta_pmp"],
-                    data["lunes_sig"],
-                    self.cfg,
-                )
-                matriz = None
-                if data["ruta_matriz"]:
-                    matriz = asegurar_dispo_en_matriz(
-                        data["ruta_matriz"],
-                        data["lunes_sig"] - timedelta(days=3),
-                        self.cfg,
-                    )
-                self.pmp_var.set(control)
-                self.cfg["ruta_pmp"] = control
-                if matriz:
-                    self.matriz_var.set(matriz)
-                    self.cfg["ruta_matriz"] = matriz
-                guardar_cfg(self.cfg)
-                siguiente = siguiente_lunes_en_pmp(control)
-                if siguiente:
-                    self.fecha_var.set(siguiente.strftime("%d/%m/%Y"))
-                self.ultimos_archivos = [p for p in [control, matriz] if p]
-                self.abrir_btn.configure(state="normal")
-                detalle = "Control PMP:\n" + control
-                if matriz:
-                    detalle += "\n\nMatriz:\n" + matriz
-                self._status("Copias actualizadas correctamente.")
-                if messagebox.askyesno("Copias listas", f"{detalle}\n\n¿Abrir el Control PMP ahora?"):
-                    abrir_archivo(control)
-            except Exception as e:
-                self._status("No se pudieron actualizar las copias.")
-                messagebox.showerror("Error al actualizar", str(e))
-
-        def consultar_dispo(self) -> None:
-            try:
-                lunes = parse_fecha(self.fecha_var.get())
-                ruta_matriz = self._ruta(self.matriz_var, "Matriz recursos", False)
-                n2, n3, fuente, aviso = self._dispo(lunes, ruta_matriz)
-                fin = lunes + timedelta(days=4)
-                texto = (
-                    f"Semana: {lunes.strftime('%d/%m/%Y')} → {fin.strftime('%d/%m/%Y')}\n"
-                    f"N2: {n2}\nN3: {n3 or 'N/A'}\nFuente: {fuente}"
-                )
-                if aviso:
-                    texto += f"\n\n{aviso}"
-                self._set_detalles(texto)
-                self._status("Disponibilidad consultada.")
-                messagebox.showinfo("Disponibilidad nocturna", texto)
-            except Exception as e:
-                self._status("No se pudo consultar la disponibilidad.")
-                messagebox.showerror("Error de disponibilidad", str(e))
-
-        def abrir_ultimo(self) -> None:
-            if self.ultimos_archivos and Path(self.ultimos_archivos[0]).is_file():
-                abrir_archivo(self.ultimos_archivos[0])
-
-    try:
-        app = PMPApp(cfg)
-        app.mainloop()
-    except Exception as e:
-        console.print(f"  [red]✗[/] No se pudo iniciar la GUI: {e}")
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  4 · MODOS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1159,55 +897,62 @@ def modo_dispo(cfg: dict) -> None:
 
 
 def modo_pmp(cfg: dict) -> None:
-    console.print(Panel("📋  Generar cuadro PMP semanal",
+    console.print(Panel("📋  Generar semana siguiente\n"
+                        "[dim]Actualiza el Control PMP y la Matriz, y crea el cuadro resumen.[/]",
                         border_style="red", box=box.ROUNDED, expand=False))
 
-    # 1 · Fecha de la semana a generar
-    lunes_sig = pedir_fecha("Semana a GENERAR (lunes)", siguiente_lunes())
-    lunes_act = lunes_sig - timedelta(weeks=1)
-
-    # 2 · Resolver archivos (auto-detección / config / manual)
+    # 1 · Resolver archivos primero (para poder sugerir la fecha correcta del Control)
     ruta_pmp = resolver_ruta(cfg, "ruta_pmp", "PMP", "Control de Gestión PMP", requerido=True)
     if not ruta_pmp:
         console.print("  [red]✗[/] Sin PMP no se puede generar."); return
     ruta_matriz = resolver_ruta(cfg, "ruta_matriz", "Matriz", "Matriz Unificada", requerido=False)
 
+    # 2 · Fecha: se sugiere la SIGUIENTE semana que falta en el Control (no el lunes
+    #     del calendario). Con Enter se aplica la correcta automáticamente.
+    try:
+        sugerida = siguiente_lunes_en_pmp(ruta_pmp) or siguiente_lunes()
+    except Exception:
+        sugerida = siguiente_lunes()
+    lunes_sig = pedir_fecha("Semana a GENERAR (lunes)", sugerida)
+
+    # 2b · Validar coherencia AHORA, antes de leer / clasificar / previsualizar.
+    ok, msg, sug = diagnostico_fecha(ruta_pmp, lunes_sig)
+    if not ok:
+        console.print(msg)
+        if sug and confirmar(f"¿Usar {sug.strftime('%d/%m/%Y')} en su lugar?", default=True):
+            lunes_sig = sug
+        else:
+            console.print("  [dim]Cancelado — no se escribió ningún archivo.[/]"); return
+    lunes_act = lunes_sig - timedelta(weeks=1)
+
     # 3 · Ausentes
     ausentes = seleccionar_ausentes(cfg["rotacion_pmp"])
 
-    # 4 · Leer + rotar + dispo  (con barra de progreso)
-    actuales = nuevas = None
+    # 4 · Leer asignaciones (con fallback de IA si cambió el formato del Excel)
+    with console.status("[cyan]Leyendo asignaciones actuales…", spinner="dots"):
+        actuales, nota_lectura = leer_asignaciones_resiliente(lunes_act, ruta_pmp, cfg)
+    if all(not v for v in actuales.values()):
+        console.print(f"  [yellow]⚠[/] No se hallaron clientes de Célula 3 para la semana "
+                      f"{lunes_act.strftime('%d/%m/%Y')} en el PMP."); return
+    if nota_lectura:
+        console.print(f"  [magenta]🤖 {nota_lectura}[/]")
+
+    # 4b · Clasificar clientes nuevos con IA (opcional, pregunta antes)
+    clasificar_clientes_nuevos(cfg, [c for cs in actuales.values() for c in cs])
+
+    # 4c · Rotar (regla determinista) + disponibilidad
+    nuevas = rotar(actuales, ausentes, cfg["rotacion_pmp"])
     n2 = n3 = None
     fuente_dispo = "cálculo automático"
-    with Progress(SpinnerColumn(style="cyan"),
-                  TextColumn("[progress.description]{task.description}"),
-                  BarColumn(bar_width=28, complete_style="cyan"),
-                  TextColumn("{task.completed}/{task.total}"),
-                  console=console, transient=True) as prog:
-        tarea = prog.add_task("Leyendo asignaciones actuales…", total=3)
+    if ruta_matriz:
         try:
-            actuales = leer_asignaciones(lunes_act, ruta_pmp, cfg["rotacion_pmp"])
+            n2, n3 = leer_dispo(lunes_sig, ruta_matriz)
+            if n2:
+                fuente_dispo = "Matriz Unificada"
         except Exception as e:
-            prog.stop(); console.print(f"  [red]✗[/] No se pudo leer el PMP: {e}"); return
-        prog.update(tarea, advance=1, description="Rotando clientes…")
-
-        if all(not v for v in actuales.values()):
-            prog.stop()
-            console.print(f"  [yellow]⚠[/] No se hallaron clientes de Célula 3 para la semana "
-                          f"{lunes_act.strftime('%d/%m/%Y')} en el PMP."); return
-        nuevas = rotar(actuales, ausentes, cfg["rotacion_pmp"])
-        prog.update(tarea, advance=1, description="Leyendo disponibilidad N2/N3…")
-
-        if ruta_matriz:
-            try:
-                n2, n3 = leer_dispo(lunes_sig, ruta_matriz)
-                if n2:
-                    fuente_dispo = "Matriz Unificada"
-            except Exception as e:
-                console.print(f"  [yellow]⚠[/] Dispo: {e}")
-        if not n2:
-            n2 = calcular_dispo_fallback(lunes_sig, cfg)
-        prog.update(tarea, advance=1, description="Listo")
+            console.print(f"  [yellow]⚠[/] Dispo: {e}")
+    if not n2:
+        n2 = calcular_dispo_fallback(lunes_sig, cfg)
 
     # Mostrar de dónde salió cada cliente (semana de referencia)
     ref = Text(f"Semana de referencia leída: {lunes_act.strftime('%d/%m/%Y')}\n", style="dim")
@@ -1217,38 +962,85 @@ def modo_pmp(cfg: dict) -> None:
             ref.append(", ".join(cls) + "\n")
     console.print(ref)
 
+    # 4d · Revisión de anomalías con IA (opcional, anonimizada)
+    if _ia_on(cfg):
+        with console.status("[magenta]Revisando anomalías con IA…", spinner="dots"):
+            anomalias = pmp_ia.revisar_anomalias(cfg, actuales, nuevas, ausentes)
+        if anomalias:
+            cuerpo = Text()
+            for a in anomalias:
+                cuerpo.append(f"  • {a}\n", style="yellow")
+            console.print(Panel(cuerpo, title="🤖  Posibles anomalías — revisar antes de generar",
+                                border_style="yellow", box=box.ROUNDED, expand=False, padding=(0, 2)))
+
     # 5 · PREVIEW + confirmación
     console.print(tabla_preview(lunes_sig, nuevas, ausentes, n2, n3, fuente_dispo, cfg))
-    if not confirmar("¿Confirmar y generar el Excel?", default=True):
+    if not confirmar("¿Confirmar y generar la semana siguiente?", default=True):
         console.print("  [dim]Cancelado — no se escribió ningún archivo.[/]"); return
 
-    # 6 · Generar Excel (junto al PMP fuente)
+    # 6 · A partir de la MISMA rotación: Control real + Matriz + cuadro resumen.
+    #     Todo se escribe en COPIAS junto a los archivos fuente; los originales no
+    #     se tocan. El Control es la operación con validaciones: si falla, se aborta
+    #     sin generar artefactos parciales para no confundir.
     dir_destino = Path(ruta_pmp).resolve().parent
-    with Progress(SpinnerColumn(style="green"),
-                  TextColumn("[progress.description]{task.description}"),
-                  BarColumn(bar_width=28, complete_style="green"),
-                  console=console, transient=True) as prog:
-        tarea = prog.add_task("Generando Excel…", total=1)
+    try:
+        with console.status("[green]Actualizando el Control PMP…", spinner="dots"):
+            control = actualizar_control_pmp(ruta_pmp, lunes_sig, ausentes, cfg)
+    except Exception as e:
+        console.print(f"  [red]✗[/] No se pudo actualizar el Control PMP: {e}")
+        return
+
+    matriz = None
+    if ruta_matriz:
         try:
-            archivo = generar_excel(lunes_sig, nuevas, n2, n3, ausentes, cfg, dir_destino)
+            with console.status("[green]Actualizando la Matriz de recursos…", spinner="dots"):
+                matriz = asegurar_dispo_en_matriz(ruta_matriz, lunes_sig - timedelta(days=3), cfg)
         except Exception as e:
-            prog.stop(); console.print(f"  [red]✗[/] Error al generar Excel: {e}"); return
-        prog.update(tarea, advance=1)
+            console.print(f"  [yellow]⚠[/] No se pudo actualizar la Matriz (se omite): {e}")
+
+    try:
+        with console.status("[green]Generando el cuadro resumen…", spinner="dots"):
+            resumen = generar_excel(lunes_sig, nuevas, n2, n3, ausentes, cfg, dir_destino)
+    except Exception as e:
+        console.print(f"  [red]✗[/] Error al generar el cuadro resumen: {e}")
+        resumen = None
 
     # 7 · Resultado
     fin = (lunes_sig + timedelta(4)).strftime("%d/%m/%Y")
     res = Text()
-    res.append("Archivo  : ", style="bold"); res.append(f"{archivo}\n", style="cyan")
-    res.append("Semana   : ", style="bold"); res.append(f"{lunes_sig.strftime('%d/%m/%Y')} → {fin}\n")
-    res.append("Dispo N2 : ", style="bold"); res.append(f"{n2}\n", style="yellow")
-    res.append("Dispo N3 : ", style="bold"); res.append(f"{n3 or 'N/A'}")
-    console.print(Panel(res, title="✅  PMP generado correctamente",
+    res.append("Semana        : ", style="bold"); res.append(f"{lunes_sig.strftime('%d/%m/%Y')} → {fin}\n")
+    res.append("Dispo N2      : ", style="bold"); res.append(f"{n2}\n", style="yellow")
+    res.append("Dispo N3      : ", style="bold"); res.append(f"{n3 or 'N/A'}\n\n")
+    res.append("Control PMP   : ", style="bold"); res.append(f"{control}\n", style="cyan")
+    res.append("Matriz        : ", style="bold"); res.append(f"{matriz or 'no actualizada'}\n",
+                                                              style="cyan" if matriz else "dim")
+    res.append("Cuadro resumen: ", style="bold"); res.append(f"{resumen or 'no generado'}",
+                                                              style="cyan" if resumen else "dim")
+    console.print(Panel(res, title="✅  Semana siguiente generada",
                         border_style="green", box=box.DOUBLE, expand=False, padding=(1, 2)))
-    console.print("  [dim]Siguiente paso: verifica el Excel y cópialo al "
-                  "Control_Gestion_PMP.xlsx en SharePoint.[/]\n")
+    console.print("  [dim]Siguiente paso: revisa el Control PMP actualizado y súbelo a "
+                  "SharePoint. El cuadro resumen es para compartirlo al equipo.[/]\n")
 
-    if confirmar("¿Abrir el archivo ahora?", default=True):
-        abrir_archivo(archivo)
+    if confirmar("¿Abrir el Control PMP actualizado ahora?", default=True):
+        abrir_archivo(control)
+    if resumen and confirmar("¿Abrir también el cuadro resumen?", default=False):
+        abrir_archivo(resumen)
+
+    # 8 · Aviso para el equipo redactado por IA (opcional, anonimizado)
+    if _ia_on(cfg) and confirmar("¿Redactar un aviso para el equipo con IA?", default=False):
+        with console.status("[magenta]Redactando aviso con IA…", spinner="dots"):
+            aviso = pmp_ia.redactar_aviso(cfg, lunes_sig, nuevas, ausentes, n2, n3)
+        if aviso:
+            console.print(Panel(aviso, title="🤖  Aviso para el equipo (revísalo antes de enviar)",
+                                border_style="magenta", box=box.ROUNDED, expand=False, padding=(1, 2)))
+            ruta_aviso = Path(dir_destino) / f"Aviso_PMP_{lunes_sig.strftime('%Y%m%d')}.txt"
+            try:
+                ruta_aviso.write_text(aviso, encoding="utf-8")
+                console.print(f"  [green]✓[/] Guardado en [cyan]{ruta_aviso}[/]\n")
+            except Exception:
+                pass
+        else:
+            console.print("  [yellow]⚠[/] La IA no devolvió un aviso (revisa conexión / key).\n")
 
 
 def modo_config(cfg: dict) -> None:
@@ -1276,8 +1068,40 @@ def modo_config(cfg: dict) -> None:
 
     _editar("ruta_pmp", "Control de Gestión PMP", "PMP", True)
     _editar("ruta_matriz", "Matriz Unificada", "Matriz", False)
+    _configurar_ia(cfg)
     guardar_cfg(cfg)
     console.print("  [green]✓[/] Configuración guardada.")
+
+
+def _configurar_ia(cfg: dict) -> None:
+    """Configura la IA (DeepSeek): pegar la API key y activar/desactivar. Opcional;
+    sin key la herramienta funciona igual con la rotación determinista."""
+    if pmp_ia is None:
+        return
+    tiene_key = bool((cfg.get("deepseek_api_key") or "").strip())
+    estado = "[green]activada[/]" if _ia_on(cfg) else (
+        "[yellow]con key pero desactivada[/]" if tiene_key else "[dim]sin configurar[/]")
+    console.print(f"\n  Asistente IA (DeepSeek): {estado}")
+    accion = _ask(questionary.select(
+        "Asistente IA — ¿qué hacer?",
+        choices=[
+            questionary.Choice("Pegar / cambiar la API key", "key"),
+            questionary.Choice("Activar IA" if not cfg.get("ia_habilitada", True) else "Desactivar IA", "toggle"),
+            questionary.Choice("Quitar la API key", "borrar"),
+            questionary.Choice("Dejar como está", "skip"),
+        ], style=QS))
+    if accion == "key":
+        nueva = _ask(questionary.password("Pega la API key de DeepSeek:", style=QS)).strip()
+        if nueva:
+            cfg["deepseek_api_key"] = nueva
+            cfg["ia_habilitada"] = True
+            console.print("  [green]✓[/] Key guardada. IA activada.")
+    elif accion == "toggle":
+        cfg["ia_habilitada"] = not cfg.get("ia_habilitada", True)
+        console.print(f"  [green]✓[/] IA {'activada' if cfg['ia_habilitada'] else 'desactivada'}.")
+    elif accion == "borrar":
+        cfg["deepseek_api_key"] = ""
+        console.print("  [green]✓[/] Key eliminada.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1293,14 +1117,15 @@ def menu(cfg: dict) -> None:
 
         rutas_ok = bool(cfg.get("ruta_pmp") and Path(cfg["ruta_pmp"]).is_file())
         estado = "[green]rutas OK ✓[/]" if rutas_ok else "[yellow]configura rutas ⚠[/]"
-        console.print(f"  Estado: {estado}\n")
+        ia_estado = "  ·  [magenta]IA ✓[/]" if _ia_on(cfg) else ""
+        console.print(f"  Estado: {estado}{ia_estado}\n")
 
         try:
             op = questionary.select(
                 "¿Qué deseas hacer?",
                 choices=[
                     questionary.Choice("🌙  Consultar disponibilidad nocturna", "1"),
-                    questionary.Choice("📋  Generar cuadro PMP semanal", "2"),
+                    questionary.Choice("📋  Generar semana siguiente", "2"),
                     questionary.Choice("⚙   Configurar rutas de archivos", "3"),
                     questionary.Choice("🚪  Salir", "0"),
                 ],
@@ -1351,9 +1176,14 @@ def _selftest() -> None:
     assert rotadas["Estefania Sanabria"] == ["A", "B"]
     assert rotadas["Mateo Florez"] == ["C"]
 
+    # siguiente_disponible: la regla única de rotación, sin y con ausentes.
+    rot = cfg["rotacion_pmp"]
+    assert siguiente_disponible("Mateo Florez", rot, []) == "Heiner Diaz"
+    assert siguiente_disponible("Mateo Florez", rot, ["Heiner Diaz"]) == "Estefania Sanabria"
+    assert siguiente_disponible("Estefania Sanabria", rot, ["Heiner Diaz"]) == "Mateo Florez"
+
     with tempfile.TemporaryDirectory() as tmp:
         pmp = Path(tmp) / "pmp.xlsx"
-        out = Path(tmp) / "pmp_out.xlsx"
         wb = Workbook()
         ws = wb.active
         ws.title = "2026"
@@ -1363,12 +1193,27 @@ def _selftest() -> None:
         ws["B3"] = "Mateo Florez"
         ws["M3"] = "Estefania Sanabria"
         wb.save(pmp)
-        generar_bloque_pmp_en_control(str(pmp), date(2026, 6, 29), cfg, str(out))
-        wb = load_workbook(out, data_only=False)
-        ws = wb["2026"]
+
+        # Sugerencia / validación de fecha (determinista): el bloque del 22/06 ya
+        # existe, así que la siguiente que falta es el 29/06.
+        assert siguiente_lunes_en_pmp(str(pmp)) == date(2026, 6, 29)
+        assert diagnostico_fecha(str(pmp), date(2026, 6, 22))[0] is False   # ya existe
+        assert diagnostico_fecha(str(pmp), date(2026, 6, 29))[0] is True    # la que falta
+
+        # Sin ausentes: rotación 1-a-1 (Mateo→Heiner, Estefania→Mateo).
+        out = Path(tmp) / "pmp_out.xlsx"
+        actualizar_control_pmp(str(pmp), date(2026, 6, 29), [], cfg, str(out))
+        ws = load_workbook(out, data_only=False)["2026"]
         assert ws["D25"].value.date() == date(2026, 6, 29)
         assert ws["O25"].value.date() == date(2026, 7, 3)
         assert ws["B27"].value == "Heiner Diaz"
+        assert ws["M27"].value == "Mateo Florez"
+
+        # Con ausentes: el renombrado salta al siguiente disponible (Mateo→Estefania).
+        out_aus = Path(tmp) / "pmp_out_aus.xlsx"
+        actualizar_control_pmp(str(pmp), date(2026, 6, 29), ["Heiner Diaz"], cfg, str(out_aus))
+        ws = load_workbook(out_aus, data_only=False)["2026"]
+        assert ws["B27"].value == "Estefania Sanabria"
         assert ws["M27"].value == "Mateo Florez"
 
         matriz = Path(tmp) / "matriz.xlsx"
@@ -1386,6 +1231,11 @@ def _selftest() -> None:
         ws = wb["ROTACION DISPO CELULA 3 "]
         assert ws["B5"].value.date() == date(2026, 6, 26)
         assert ws["D5"].value == "Mateo Florez"
+
+    # La capa de IA debe viajar con la app (también dentro del binario empaquetado).
+    assert pmp_ia is not None, "pmp_ia no disponible (¿faltó en el empaquetado?)"
+    pmp_ia._selftest()
+    print("IA embebida:", "sí" if _ia_on(DEFAULT_CFG) else "no")
     print("self-test ok")
 
 
@@ -1398,9 +1248,14 @@ if __name__ == "__main__":
         if "--self-test" in sys.argv:
             _selftest()
             sys.exit(0)
-        if "--gui" in sys.argv or not (sys.stdin.isatty() and sys.stdout.isatty()):
-            lanzar_gui(cfg)
-            sys.exit(0)
+        # Herramienta interactiva: necesita una terminal real. Al abrir el
+        # ejecutable por doble clic, Windows (PMP.exe) y macOS ('Lanzar PMP.command')
+        # la proveen. Si por algún motivo no la hay, se avisa en vez de fallar.
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            print("Esta herramienta es interactiva: ábrela con doble clic\n"
+                  "  · Windows: PMP.exe\n"
+                  "  · macOS:   'Lanzar PMP.command'")
+            sys.exit(1)
         banner()
         menu(cfg)
     except (KeyboardInterrupt, EOFError):
