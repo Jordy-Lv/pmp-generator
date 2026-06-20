@@ -1,8 +1,8 @@
 # Guía de uso — PMP Generator
 
 Esta herramienta arma sola el **PMP de la semana siguiente**: actualiza el
-Control, la Matriz de disponibilidad y genera un cuadro resumen para compartir.
-No necesitas instalar nada ni saber de programación. Sigue estos pasos.
+Control, la Matriz de disponibilidad y, si quieres, genera un cuadro resumen para
+compartir. No necesitas instalar nada ni saber de programación. Sigue estos pasos.
 
 ---
 
@@ -41,14 +41,19 @@ Al abrir se ve un menú. Te mueves con las **flechas ↑ ↓** y eliges con **En
 
 ### Generar la semana siguiente
 1. Elige **📋 Generar semana siguiente**.
-2. Te propone la fecha del próximo lunes. Si está bien, pulsa **Enter**;
-   si no, escríbela como `DD/MM/AAAA` (por ejemplo `29/06/2026`).
+2. La herramienta **detecta sola** la última semana que hay en el Control y propone
+   generar la **siguiente**. Solo tienes que **confirmar con Enter** — ya no
+   escribes fechas. (Si alguna vez necesitas otra semana, responde que no y podrás
+   indicarla a mano.)
 3. La herramienta busca sola los dos Excel. Si encuentra varios, te deja elegir
    con las flechas.
 4. Te pregunta si **alguien está ausente** esa semana. Marca con la **barra
    espaciadora** a quien corresponda (o ninguno) y pulsa **Enter**.
 5. Aparece una **vista previa** de cómo queda la rotación. Revísala.
-6. Confirma con **Enter**. Listo: se crean los archivos.
+6. Confirma con **Enter**. Se actualiza el Control (copiando la semana tal cual y
+   rotando solo a los encargados de Célula 3) y la Matriz de disponibilidad.
+7. Al final te pregunta si quieres **además** un **cuadro resumen** aparte para
+   compartir al equipo. Es opcional: pulsa Enter para omitirlo.
 
 ### Consultar disponibilidad nocturna
 Elige **🌙 Consultar disponibilidad nocturna**, indica la semana, y te muestra
@@ -63,7 +68,7 @@ nuevos para no pisar nada:
 
 - **Control actualizado**: `Control_Gestion_PMP_actualizado_AAAAMMDD.xlsx`
 - **Matriz actualizada**: `Matriz..._actualizada_AAAAMMDD.xlsx`
-- **Cuadro resumen** (para compartir al equipo): `PMP_Semana_AAAAMMDD.xlsx`
+- **Cuadro resumen** (solo si lo pediste, para compartir): `PMP_Semana_AAAAMMDD.xlsx`
 
 Los archivos originales **no se modifican**. Al terminar, la herramienta te
 ofrece abrir el Control actualizado para que lo revises antes de subirlo a

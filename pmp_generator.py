@@ -108,10 +108,20 @@ CONFIG_PATH = Path.home() / ".pmp_celula3.json"
 DEFAULT_CFG: dict = {
     "ruta_pmp":        "",
     "ruta_matriz":     "",
-    "rotacion_pmp":    ["Mateo Florez", "Heiner Diaz", "Estefania Sanabria"],
+    # Orden del giro semanal: cada cliente de Célula 3 pasa de su encargado actual
+    # al SIGUIENTE de esta lista (Heiner→Mateo→Estefania→Heiner).
+    "rotacion_pmp":    ["Heiner Diaz", "Mateo Florez", "Estefania Sanabria"],
     "rotacion_n2":     ["Estefania Sanabria", "Heiner Diaz", "Mateo Florez"],
     "fecha_base_n2":   "2026-06-12",
     "rotacion_n3":     ["Carlos Barrera", "Santiago Amaya", "Adriano Carreño"],
+    # Clientes que la Célula 3 rota entre sus 3 encargados. Se usan para LEER el
+    # reparto de una semana por nombre de cliente (no por posición de columna), de
+    # modo que la lectura aguante cambios de estructura del Excel.
+    "clientes_celula3": [
+        "La Riviera (APP)", "La Riviera (DB)", "HOMI Oracle", "HOMI SQLServer / MySQL",
+        "Novaventa (DB2)", "Novaventa (SQLServer)", "EMI", "Acción Fiduciaria (Oracle)",
+        "Acción Fiduciaria (SQLServer)", "Bancoldex (Oracle)",
+    ],
     "horario_tarde":   ["La Riviera (APP)", "La Riviera (DB)", "HOMI Oracle", "HOMI SQLServer / MySQL"],
     "clientes_largos": ["HOMI Oracle", "HOMI SQLServer / MySQL"],
     # ── IA opcional (DeepSeek). Vacía = desactivada; la configura el responsable. ──
@@ -666,6 +676,64 @@ def _fecha_excel(d: date) -> datetime:
     return datetime.combine(d, datetime.min.time())
 
 
+# ── Festivos de Colombia (deterministas, sin internet) ───────────────────────────
+def _domingo_pascua(anio: int) -> date:
+    """Domingo de Pascua por el algoritmo de Butcher (calendario gregoriano)."""
+    a = anio % 19
+    b, c = divmod(anio, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    el = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * el) // 451
+    mes, dia = divmod(h + el - 7 * m + 114, 31)
+    return date(anio, mes, dia + 1)
+
+
+def festivos_colombia(anio: int) -> set:
+    """Conjunto de fechas festivas de Colombia en `anio` (ley Emiliani + Pascua)."""
+    def lunes_siguiente(d: date) -> date:
+        return d + timedelta(days=(7 - d.weekday()) % 7)   # 0 si ya es lunes
+
+    fest = {date(anio, m, d) for m, d in [(1, 1), (5, 1), (7, 20), (8, 7), (12, 8), (12, 25)]}
+    # Trasladables al lunes siguiente
+    for m, d in [(1, 6), (3, 19), (6, 29), (8, 15), (10, 12), (11, 1), (11, 11)]:
+        fest.add(lunes_siguiente(date(anio, m, d)))
+    # Móviles ligados a la Pascua
+    p = _domingo_pascua(anio)
+    fest.add(p - timedelta(days=3))                       # Jueves Santo
+    fest.add(p - timedelta(days=2))                       # Viernes Santo
+    fest.add(lunes_siguiente(p + timedelta(days=39)))     # Ascensión
+    fest.add(lunes_siguiente(p + timedelta(days=60)))     # Corpus Christi
+    fest.add(lunes_siguiente(p + timedelta(days=68)))     # Sagrado Corazón
+    return fest
+
+
+def es_festivo(d: date) -> bool:
+    return d in festivos_colombia(d.year)
+
+
+def _cliente_de_fila(ws, r: int, cols_consultor: set) -> Optional[str]:
+    """Cliente que atiende la fila `r`: el primer texto que no sea consultor,
+    horario, fecha, '-' ni 'FESTIVO'. Sirve para rellenar la columna de un día que
+    dejó de ser festivo (donde antes había 'FESTIVO')."""
+    for c in range(1, ws.max_column + 1):
+        if c in cols_consultor:
+            continue
+        v = ws.cell(r, c).value
+        if not isinstance(v, str):
+            continue
+        s = v.strip()
+        if not s or s in ("-", "FESTIVO", "Consultor", "HORA DE ENVIO"):
+            continue
+        if s.startswith("Mañana") or s.startswith("Tarde"):
+            continue
+        return s
+    return None
+
+
 def _headers_semana_pmp(ws) -> List[Tuple[int, date]]:
     headers: List[Tuple[int, date]] = []
     for row in range(1, ws.max_row + 1):
@@ -673,6 +741,77 @@ def _headers_semana_pmp(ws) -> List[Tuple[int, date]]:
         if hasattr(valor, "date") and str(ws.cell(row, 2).value).strip() == "Consultor":
             headers.append((row, valor.date()))
     return headers
+
+
+def _espaciado_bloques(headers: List[Tuple[int, date]]) -> int:
+    """Filas que ocupa cada bloque semanal = distancia entre los dos últimos
+    encabezados. El archivo real arrancó con bloques de 27-29 filas y se estabilizó
+    en 24; usar la última distancia hace que copiar/pegar la semana nueva use el
+    tamaño real vigente en lugar de un número cableado."""
+    filas = sorted(r for r, _ in headers)
+    if len(filas) >= 2:
+        return filas[-1] - filas[-2]
+    return 24
+
+
+def leer_reparto_c3(ws, lunes: date, clientes_c3: List[str],
+                    consultores: List[str]) -> Tuple[Dict[str, List[str]], List[str]]:
+    """Lee el reparto de los clientes de Célula 3 para la semana `lunes`, robusto a
+    la posición de las columnas.
+
+    En cada fila del bloque busca el cliente de C3 (por nombre) y lo asigna al
+    consultor de C3 que aparezca MÁS A LA DERECHA en esa misma fila — esa es la
+    tabla-resumen de Célula 3, que en este archivo se ha movido de la columna M a la
+    L. Devuelve ({consultor: [clientes]}, [clientes_no_encontrados]).
+    """
+    reparto: Dict[str, List[str]] = {c: [] for c in consultores}
+    set_cons = set(consultores)
+    set_cli = set(clientes_c3)
+    headers = _headers_semana_pmp(ws)
+    fila_ini = next((r for r, f in headers if f == lunes), None)
+    if fila_ini is None:
+        return reparto, list(clientes_c3)
+
+    espaciado = _espaciado_bloques(headers)
+    siguientes = [r for r, _ in headers if r > fila_ini]
+    fila_fin = min(siguientes) if siguientes else fila_ini + espaciado
+    maxcol = ws.max_column
+
+    vistos: set = set()
+    for row in range(fila_ini + 1, fila_fin):
+        # cliente de C3 en la fila (puede repetirse por día; basta uno)
+        cliente = None
+        for col in range(1, maxcol + 1):
+            v = ws.cell(row, col).value
+            if isinstance(v, str) and v.strip() in set_cli:
+                cliente = v.strip()
+                break
+        if not cliente:
+            continue
+        # consultor de C3 más a la derecha (= tabla resumen de Célula 3)
+        consultor = None
+        for col in range(maxcol, 0, -1):
+            v = ws.cell(row, col).value
+            if isinstance(v, str) and v.strip() in set_cons:
+                consultor = v.strip()
+                break
+        if consultor and cliente not in reparto[consultor]:
+            reparto[consultor].append(cliente)
+            vistos.add(cliente)
+
+    faltantes = [c for c in clientes_c3 if c not in vistos]
+    return reparto, faltantes
+
+
+def leer_reparto_actual(ruta_pmp: str, lunes: date, cfg: dict) -> Tuple[Dict[str, List[str]], List[str]]:
+    """Abre el Control y lee el reparto de Célula 3 de la semana `lunes`.
+    Devuelve ({consultor: [clientes]}, [clientes no ubicados])."""
+    from openpyxl import load_workbook
+    try:
+        ws = load_workbook(ruta_pmp, data_only=True)["2026"]
+    except Exception:
+        return {c: [] for c in cfg["rotacion_pmp"]}, list(cfg.get("clientes_celula3", []))
+    return leer_reparto_c3(ws, lunes, cfg.get("clientes_celula3", []), cfg["rotacion_pmp"])
 
 
 def siguiente_lunes_en_pmp(ruta_pmp: str) -> Optional[date]:
@@ -771,11 +910,15 @@ def actualizar_control_pmp(ruta_pmp: str, lunes: date, ausentes: List[str], cfg:
             f"es {(source_lunes + timedelta(days=7)).strftime('%d/%m/%Y')}."
         )
 
-    target_row = source_row + 24
-    if any(ws.cell(r, c).value is not None for r in range(target_row, target_row + 21) for c in range(1, 16)):
+    # Tamaño real del bloque (header→header) en vez de un alto cableado, para copiar
+    # la semana COMPLETA sin perder filas finales (p. ej. las de Terpel).
+    alto = _espaciado_bloques(headers)
+    target_row = source_row + alto
+    if any(ws.cell(r, c).value is not None
+           for r in range(target_row, target_row + alto) for c in range(1, 16)):
         raise ValueError(f"La zona destino desde la fila {target_row} no está vacía.")
 
-    _copiar_bloque(ws, source_row, target_row)
+    _copiar_bloque(ws, source_row, target_row, alto=alto)
 
     date_cols = [
         c for c in range(1, ws.max_column + 1)
@@ -784,11 +927,82 @@ def actualizar_control_pmp(ruta_pmp: str, lunes: date, ausentes: List[str], cfg:
     for idx, col in enumerate(date_cols[:5]):
         ws.cell(target_row, col).value = _fecha_excel(lunes + timedelta(days=idx))
 
-    for row in range(target_row + 1, target_row + 21):
-        for col in (2, 13):
-            valor = ws.cell(row, col).value
-            if valor in cfg["rotacion_pmp"]:
-                ws.cell(row, col).value = siguiente_disponible(valor, cfg["rotacion_pmp"], ausentes)
+    rotacion = cfg["rotacion_pmp"]
+    set_rot = set(rotacion)
+    set_c3 = set(cfg.get("clientes_celula3", []))
+    # Columnas "Consultor" del bloque (tabla izquierda y tabla-resumen derecha;
+    # se detectan por el encabezado, así aguantan que se hayan movido de columna).
+    cols_cons = {c for c in range(1, ws.max_column + 1)
+                 if str(ws.cell(target_row, c).value or "").strip() == "Consultor"}
+
+    # Rotación: por cada fila de datos, si atiende un cliente de Célula 3 se pone el
+    # SIGUIENTE encargado (giro de cfg['rotacion_pmp']) en sus columnas de consultor;
+    # si el cliente NO es de Célula 3, el consultor se deja en blanco (este documento
+    # es solo de C3). Todo lo demás (clientes, horarios, formato) queda idéntico.
+    for row in range(target_row + 1, target_row + alto):
+        cli_c3 = None
+        for c in range(1, ws.max_column + 1):
+            v = ws.cell(row, c).value
+            if isinstance(v, str) and v.strip() in set_c3:
+                cli_c3 = v.strip(); break
+        if cli_c3:
+            actual = None                       # encargado de C3 más a la derecha (tabla resumen)
+            for c in range(ws.max_column, 0, -1):
+                v = ws.cell(row, c).value
+                if isinstance(v, str) and v.strip() in set_rot:
+                    actual = v.strip(); break
+            if actual:
+                nuevo = siguiente_disponible(actual, rotacion, ausentes)
+                for c in cols_cons:
+                    ws.cell(row, c).value = nuevo
+        else:
+            for c in cols_cons:
+                v = ws.cell(row, c).value
+                if isinstance(v, str) and v.strip() and v.strip() != "Consultor":
+                    ws.cell(row, c).value = None
+
+    # FESTIVO real: la columna del lunes suele ser una celda combinada "FESTIVO". Si
+    # el lunes nuevo NO es festivo en Colombia, se deshace la combinación y se rellena
+    # con el cliente de cada fila (como en una semana normal); si lo es, se conserva.
+    if date_cols:
+        col_lunes = date_cols[0]
+        if not es_festivo(lunes):
+            for m in list(ws.merged_cells.ranges):
+                if (m.min_col == col_lunes == m.max_col
+                        and target_row <= m.min_row <= target_row + alto):
+                    celda = ws.cell(m.min_row, col_lunes)
+                    if isinstance(celda.value, str) and celda.value.strip().upper() == "FESTIVO":
+                        filas = list(range(m.min_row, m.max_row + 1))
+                        ws.unmerge_cells(str(m))
+                        for r in filas:
+                            cli = _cliente_de_fila(ws, r, cols_cons)
+                            d = ws.cell(r, col_lunes)
+                            d.value = cli
+                            # Al deshacer la celda combinada, el lunes queda sin estilo.
+                            # Copiar el formato de la columna del MISMO cliente (negrita,
+                            # centrado, color) para que se vea igual que los demás días.
+                            ref_col = next((c for c in range(col_lunes + 1, ws.max_column + 1)
+                                            if c not in cols_cons and ws.cell(r, c).value == cli), None)
+                            if ref_col:
+                                ref = ws.cell(r, ref_col)
+                                d._style = copy.copy(ref._style)
+                                d.font = copy.copy(ref.font)
+                                d.fill = copy.copy(ref.fill)
+                                d.border = copy.copy(ref.border)
+                                d.alignment = copy.copy(ref.alignment)
+                                d.number_format = ref.number_format
+
+    # Ancho de columna: al moverse la tabla-resumen de C3 a la columna L (más
+    # estrecha que la M que usaba antes), los nombres salían cortados. Se igualan
+    # las columnas de "Consultor" al ancho de la más ancha para que se lean enteros.
+    from openpyxl.utils import get_column_letter
+    anchos = [ws.column_dimensions[get_column_letter(c)].width or 0 for c in cols_cons]
+    if anchos:
+        ancho_obj = max(anchos)
+        for c in cols_cons:
+            letra = get_column_letter(c)
+            if (ws.column_dimensions[letra].width or 0) < ancho_obj:
+                ws.column_dimensions[letra].width = ancho_obj
 
     destino = salida or str(Path(ruta_pmp).with_name(
         f"{Path(ruta_pmp).stem}_actualizado_{lunes.strftime('%Y%m%d')}.xlsx"
@@ -803,6 +1017,22 @@ def _ultima_fila_dispo(ws) -> Optional[int]:
         if hasattr(ws.cell(row, 2).value, "date") and hasattr(ws.cell(row, 3).value, "date"):
             ultima = row
     return ultima
+
+
+def cobertura_dispo(ruta_matriz: str) -> Optional[date]:
+    """Último viernes (fin de disponibilidad) cubierto en la Matriz. Sirve para
+    avisar al usuario hasta cuándo está rellena y cuándo tocará extenderla."""
+    from openpyxl import load_workbook
+    try:
+        ws = load_workbook(ruta_matriz, data_only=True)["ROTACION DISPO CELULA 3 "]
+    except Exception:
+        return None
+    fin = None
+    for row in range(1, ws.max_row + 1):
+        c = ws.cell(row, 3).value
+        if hasattr(c, "date") and (fin is None or c.date() > fin):
+            fin = c.date()
+    return fin
 
 
 def asegurar_dispo_en_matriz(ruta_matriz: str, inicio: date, cfg: dict,
@@ -892,6 +1122,11 @@ def modo_dispo(cfg: dict) -> None:
     cuerpo.append("N2 (incidentes nocturnos) : ", style="bold"); cuerpo.append(f"{n2}\n", style="cyan")
     cuerpo.append("N3 (escalamiento)         : ", style="bold"); cuerpo.append(f"{n3 or 'N/A'}\n")
     cuerpo.append("Fuente                    : ", style="bold"); cuerpo.append(fuente, style="dim")
+    if ruta_matriz:
+        cob = cobertura_dispo(ruta_matriz)
+        if cob:
+            cuerpo.append("\nCubierta hasta            : ", style="bold")
+            cuerpo.append(cob.strftime("%d/%m/%Y"), style="dim")
     console.print(Panel(cuerpo, title=f"🌙  Disponibilidad — {lunes.strftime('%d/%m/%Y')} → {fin}",
                         border_style="yellow", box=box.ROUNDED, expand=False, padding=(1, 2)))
 
@@ -907,13 +1142,20 @@ def modo_pmp(cfg: dict) -> None:
         console.print("  [red]✗[/] Sin PMP no se puede generar."); return
     ruta_matriz = resolver_ruta(cfg, "ruta_matriz", "Matriz", "Matriz Unificada", requerido=False)
 
-    # 2 · Fecha: se sugiere la SIGUIENTE semana que falta en el Control (no el lunes
-    #     del calendario). Con Enter se aplica la correcta automáticamente.
+    # 2 · Fecha AUTOMÁTICA: se detecta la última semana registrada en el Control y se
+    #     usa la siguiente. El usuario no escribe fechas; solo confirma. Si necesita
+    #     otra (caso raro), puede escribirla al responder que no.
     try:
         sugerida = siguiente_lunes_en_pmp(ruta_pmp) or siguiente_lunes()
     except Exception:
         sugerida = siguiente_lunes()
-    lunes_sig = pedir_fecha("Semana a GENERAR (lunes)", sugerida)
+    fin_sug = (sugerida + timedelta(4)).strftime("%d/%m/%Y")
+    console.print(f"  [green]✓[/] Detectada la última semana del Control. Se generará la "
+                  f"siguiente: [cyan]{sugerida.strftime('%d/%m/%Y')} → {fin_sug}[/].")
+    if confirmar(f"¿Generar la semana del {sugerida.strftime('%d/%m/%Y')}?", default=True):
+        lunes_sig = sugerida
+    else:
+        lunes_sig = pedir_fecha("Semana a GENERAR (lunes)", sugerida)
 
     # 2b · Validar coherencia AHORA, antes de leer / clasificar / previsualizar.
     ok, msg, sug = diagnostico_fecha(ruta_pmp, lunes_sig)
@@ -928,14 +1170,16 @@ def modo_pmp(cfg: dict) -> None:
     # 3 · Ausentes
     ausentes = seleccionar_ausentes(cfg["rotacion_pmp"])
 
-    # 4 · Leer asignaciones (con fallback de IA si cambió el formato del Excel)
-    with console.status("[cyan]Leyendo asignaciones actuales…", spinner="dots"):
-        actuales, nota_lectura = leer_asignaciones_resiliente(lunes_act, ruta_pmp, cfg)
+    # 4 · Leer el reparto actual de Célula 3 — por NOMBRE de cliente, robusto a que
+    #     las columnas se hayan movido (tabla resumen en M o en L).
+    with console.status("[cyan]Leyendo el reparto actual de Célula 3…", spinner="dots"):
+        actuales, faltantes = leer_reparto_actual(ruta_pmp, lunes_act, cfg)
     if all(not v for v in actuales.values()):
-        console.print(f"  [yellow]⚠[/] No se hallaron clientes de Célula 3 para la semana "
-                      f"{lunes_act.strftime('%d/%m/%Y')} en el PMP."); return
-    if nota_lectura:
-        console.print(f"  [magenta]🤖 {nota_lectura}[/]")
+        console.print(f"  [yellow]⚠[/] No se halló el reparto de Célula 3 para la semana "
+                      f"{lunes_act.strftime('%d/%m/%Y')} en el Control."); return
+    if faltantes:
+        console.print(f"  [yellow]⚠[/] Clientes no ubicados esa semana: "
+                      f"{', '.join(faltantes)} — revísalo en la vista previa.")
 
     # 4b · Clasificar clientes nuevos con IA (opcional, pregunta antes)
     clasificar_clientes_nuevos(cfg, [c for cs in actuales.values() for c in cs])
@@ -995,15 +1239,24 @@ def modo_pmp(cfg: dict) -> None:
         try:
             with console.status("[green]Actualizando la Matriz de recursos…", spinner="dots"):
                 matriz = asegurar_dispo_en_matriz(ruta_matriz, lunes_sig - timedelta(days=3), cfg)
+            cob = cobertura_dispo(matriz or ruta_matriz)
+            if cob:
+                console.print(f"  [dim]🌙 Disponibilidad nocturna cubierta hasta el "
+                              f"{cob.strftime('%d/%m/%Y')}.[/]")
         except Exception as e:
             console.print(f"  [yellow]⚠[/] No se pudo actualizar la Matriz (se omite): {e}")
 
-    try:
-        with console.status("[green]Generando el cuadro resumen…", spinner="dots"):
-            resumen = generar_excel(lunes_sig, nuevas, n2, n3, ausentes, cfg, dir_destino)
-    except Exception as e:
-        console.print(f"  [red]✗[/] Error al generar el cuadro resumen: {e}")
-        resumen = None
+    # Cuadro resumen: tabla NUEVA y formateada, aparte, para compartir al equipo.
+    # Es opcional (por defecto no): el entregable principal es el Control copiado+rotado.
+    resumen = None
+    if confirmar("¿Generar además un cuadro resumen aparte para compartir al equipo?",
+                 default=False):
+        try:
+            with console.status("[green]Generando el cuadro resumen…", spinner="dots"):
+                resumen = generar_excel(lunes_sig, nuevas, n2, n3, ausentes, cfg, dir_destino)
+        except Exception as e:
+            console.print(f"  [red]✗[/] Error al generar el cuadro resumen: {e}")
+            resumen = None
 
     # 7 · Resultado
     fin = (lunes_sig + timedelta(4)).strftime("%d/%m/%Y")
@@ -1172,15 +1425,24 @@ def _selftest() -> None:
         "Heiner Diaz": ["B"],
         "Estefania Sanabria": ["C"],
     }
+    # Giro Heiner→Mateo→Estefania→Heiner. Con Heiner ausente, su destino salta.
     rotadas = rotar(actuales, ["Heiner Diaz"], cfg["rotacion_pmp"])
-    assert rotadas["Estefania Sanabria"] == ["A", "B"]
-    assert rotadas["Mateo Florez"] == ["C"]
+    assert rotadas["Estefania Sanabria"] == ["A"]       # Mateo→Estefania
+    assert rotadas["Mateo Florez"] == ["B", "C"]         # Heiner→Mateo; Estefania→(Heiner ausente)→Mateo
+    assert rotadas["Heiner Diaz"] == []
 
     # siguiente_disponible: la regla única de rotación, sin y con ausentes.
     rot = cfg["rotacion_pmp"]
-    assert siguiente_disponible("Mateo Florez", rot, []) == "Heiner Diaz"
-    assert siguiente_disponible("Mateo Florez", rot, ["Heiner Diaz"]) == "Estefania Sanabria"
+    assert siguiente_disponible("Heiner Diaz", rot, []) == "Mateo Florez"
+    assert siguiente_disponible("Mateo Florez", rot, []) == "Estefania Sanabria"
+    assert siguiente_disponible("Estefania Sanabria", rot, []) == "Heiner Diaz"
     assert siguiente_disponible("Estefania Sanabria", rot, ["Heiner Diaz"]) == "Mateo Florez"
+
+    # Festivos de Colombia (deterministas): los que de hecho aparecen en el Control.
+    assert es_festivo(date(2026, 6, 8))     # Corpus Christi (trasladado)
+    assert es_festivo(date(2026, 6, 15))    # Sagrado Corazón
+    assert not es_festivo(date(2026, 6, 22))
+    assert es_festivo(date(2026, 6, 29))    # San Pedro y Pablo (trasladado)
 
     with tempfile.TemporaryDirectory() as tmp:
         pmp = Path(tmp) / "pmp.xlsx"
@@ -1191,7 +1453,6 @@ def _selftest() -> None:
         for col, d in zip((4, 6, 8, 9, 15), [date(2026, 6, 22) + timedelta(days=i) for i in range(5)]):
             ws.cell(1, col).value = _fecha_excel(d)
         ws["B3"] = "Mateo Florez"
-        ws["M3"] = "Estefania Sanabria"
         wb.save(pmp)
 
         # Sugerencia / validación de fecha (determinista): el bloque del 22/06 ya
@@ -1199,22 +1460,6 @@ def _selftest() -> None:
         assert siguiente_lunes_en_pmp(str(pmp)) == date(2026, 6, 29)
         assert diagnostico_fecha(str(pmp), date(2026, 6, 22))[0] is False   # ya existe
         assert diagnostico_fecha(str(pmp), date(2026, 6, 29))[0] is True    # la que falta
-
-        # Sin ausentes: rotación 1-a-1 (Mateo→Heiner, Estefania→Mateo).
-        out = Path(tmp) / "pmp_out.xlsx"
-        actualizar_control_pmp(str(pmp), date(2026, 6, 29), [], cfg, str(out))
-        ws = load_workbook(out, data_only=False)["2026"]
-        assert ws["D25"].value.date() == date(2026, 6, 29)
-        assert ws["O25"].value.date() == date(2026, 7, 3)
-        assert ws["B27"].value == "Heiner Diaz"
-        assert ws["M27"].value == "Mateo Florez"
-
-        # Con ausentes: el renombrado salta al siguiente disponible (Mateo→Estefania).
-        out_aus = Path(tmp) / "pmp_out_aus.xlsx"
-        actualizar_control_pmp(str(pmp), date(2026, 6, 29), ["Heiner Diaz"], cfg, str(out_aus))
-        ws = load_workbook(out_aus, data_only=False)["2026"]
-        assert ws["B27"].value == "Estefania Sanabria"
-        assert ws["M27"].value == "Mateo Florez"
 
         matriz = Path(tmp) / "matriz.xlsx"
         matriz_out = Path(tmp) / "matriz_out.xlsx"
@@ -1231,6 +1476,68 @@ def _selftest() -> None:
         ws = wb["ROTACION DISPO CELULA 3 "]
         assert ws["B5"].value.date() == date(2026, 6, 26)
         assert ws["D5"].value == "Mateo Florez"
+        assert cobertura_dispo(matriz_out) == date(2026, 7, 3)
+
+    # ── Estructura NUEVA del Control: tabla-resumen de C3 en la columna L, días en
+    #    E/F/H/I/N, dos tablas lado a lado. Verifica lectura por NOMBRE y rotación en
+    #    AMBAS tablas, inmune a que la columna del consultor se haya movido. ──
+    with tempfile.TemporaryDirectory() as tmp2:
+        ruta = Path(tmp2) / "control_nuevo.xlsx"
+        wb = Workbook(); ws = wb.active; ws.title = "2026"
+
+        def _bloque(fila, lunes_b, filas_datos):
+            ws.cell(fila, 2).value = "Consultor"          # tabla izquierda
+            ws.cell(fila, 12).value = "Consultor"         # tabla resumen (derecha, col L)
+            for col, d in zip((4, 6, 8, 9, 14),
+                              [lunes_b + timedelta(days=i) for i in range(5)]):
+                ws.cell(fila, col).value = _fecha_excel(d)
+            for i, (b_izq, cliente, l_der) in enumerate(filas_datos, start=1):
+                r = fila + i
+                ws.cell(r, 2).value = b_izq               # consultor operación (izq)
+                ws.cell(r, 5).value = cliente             # cliente por día (col E)
+                ws.cell(r, 12).value = l_der              # consultor C3 (derecha, col L)
+                ws.cell(r, 14).value = cliente            # cliente (tabla resumen)
+
+        _bloque(1, date(2026, 6, 15), [("Heiner Diaz", "HOMI Oracle", "Heiner Diaz")])
+        # 'La Riviera (APP)' la lleva en la izquierda alguien de FUERA de C3 (Susana),
+        # pero la tabla resumen (derecha) la asigna a Estefania → manda la derecha.
+        # 'D1 Oracle' no es de C3 → su consultor debe quedar en blanco al copiar.
+        _bloque(13, date(2026, 6, 22), [
+            ("Mateo Florez",     "HOMI Oracle",        "Mateo Florez"),
+            ("Susana Rodriguez", "La Riviera (APP)",   "Estefania Sanabria"),
+            ("Heiner Diaz",      "Bancoldex (Oracle)", "Heiner Diaz"),
+            ("Juan Pablo Lombo", "D1 Oracle",          "Juan Pablo Lombo"),
+        ])
+        wb.save(ruta)
+
+        rep, _falt = leer_reparto_c3(load_workbook(ruta, data_only=True)["2026"],
+                                     date(2026, 6, 22), cfg["clientes_celula3"], cfg["rotacion_pmp"])
+        assert rep["Mateo Florez"] == ["HOMI Oracle"], rep
+        assert rep["Estefania Sanabria"] == ["La Riviera (APP)"], rep
+        assert rep["Heiner Diaz"] == ["Bancoldex (Oracle)"], rep
+        assert _espaciado_bloques(_headers_semana_pmp(load_workbook(ruta)["2026"])) == 12
+
+        out = Path(tmp2) / "control_out.xlsx"
+        actualizar_control_pmp(str(ruta), date(2026, 6, 29), [], cfg, str(out))
+        ws2 = load_workbook(out, data_only=False)["2026"]
+        assert ws2.cell(25, 4).value.date() == date(2026, 6, 29)     # D = lunes nuevo
+        assert ws2.cell(25, 14).value.date() == date(2026, 7, 3)     # N = viernes nuevo
+        # HOMI Oracle (C3): Mateo→Estefania en AMBAS tablas; el cliente intacto.
+        assert ws2.cell(26, 2).value == "Estefania Sanabria"
+        assert ws2.cell(26, 12).value == "Estefania Sanabria"
+        assert ws2.cell(26, 5).value == "HOMI Oracle"
+        # La Riviera (C3): Estefania→Heiner en ambas tablas; la izquierda, que tenía a
+        # Susana, también toma el encargado de C3 porque el cliente SÍ es de C3.
+        assert ws2.cell(27, 2).value == "Heiner Diaz"
+        assert ws2.cell(27, 12).value == "Heiner Diaz"
+        # Bancoldex (C3): Heiner→Mateo.
+        assert ws2.cell(28, 2).value == "Mateo Florez"
+        assert ws2.cell(28, 12).value == "Mateo Florez"
+        # D1 Oracle (NO es de C3): el consultor queda en blanco en ambas tablas; el
+        # cliente se conserva.
+        assert ws2.cell(29, 2).value is None
+        assert ws2.cell(29, 12).value is None
+        assert ws2.cell(29, 5).value == "D1 Oracle"
 
     # La capa de IA debe viajar con la app (también dentro del binario empaquetado).
     assert pmp_ia is not None, "pmp_ia no disponible (¿faltó en el empaquetado?)"

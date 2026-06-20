@@ -3,18 +3,25 @@
 Herramienta que automatiza la **rotación semanal de clientes PMP** del equipo de
 la Célula 3 (Mateo → Heiner → Estefania → Mateo).
 
-A partir de los dos Excel reales, genera de una sola vez la semana siguiente:
+La fecha es **automática**: detecta la última semana registrada en el Control y
+genera la **siguiente** (solo hay que confirmar). A partir de los dos Excel reales:
 
-- **`Control_Gestion_PMP.xlsx`** (pestaña `2026`): añade el bloque de la semana
-  siguiente, conservando el formato real y rotando los consultores.
+- **`Control_Gestion_PMP.xlsx`** (pestaña `2026`): **copia el bloque semanal tal
+  cual** debajo del último y cambia solo lo necesario: las fechas a la semana
+  siguiente, el encargado de cada cliente de Célula 3 (giro
+  `Heiner→Mateo→Estefania`), deja **en blanco** el consultor de los clientes que no
+  son de Célula 3, y pone **"FESTIVO"** únicamente en los días que de verdad lo son
+  (festivos de Colombia, calculados). Los clientes se ubican **por nombre**, así
+  aguanta que la tabla-resumen de Célula 3 se haya movido de columna.
 - **`Matriz Unificada de Recursos.xlsx`** (pestaña `ROTACION DISPO CELULA 3 `):
-  asegura la fila de disponibilidad nocturna N2/N3 viernes-viernes. Si no está la
-  Matriz, la disponibilidad se calcula por rotación.
-- **Cuadro resumen** (`PMP_Semana_AAAAMMDD.xlsx`): un Excel formateado y listo
-  para compartir al equipo.
+  detecta hasta qué viernes está cubierta y **extiende** las semanas N2/N3
+  viernes-viernes que falten. Si no está la Matriz, la disponibilidad se calcula
+  por rotación.
+- **Cuadro resumen** (`PMP_Semana_AAAAMMDD.xlsx`): Excel formateado para compartir
+  al equipo. Es **opcional** (se pregunta al final).
 
-Los tres salen de **una sola rotación**, así que siempre coinciden. Todo se
-escribe en **copias** junto a los archivos fuente; los originales no se tocan.
+El Control y el cuadro resumen salen de **una sola rotación**, así que coinciden.
+Todo se escribe en **copias** junto a los archivos fuente; los originales no se tocan.
 
 > **Para la persona que solo va a usar la herramienta:** ver **[GUIA_USO.md](GUIA_USO.md)**
 > (instalación por doble clic, sin tocar nada técnico).
@@ -26,8 +33,9 @@ escribe en **copias** junto a los archivos fuente; los originales no se tocan.
 Al abrir la herramienta aparece un menú con flechas:
 
 1. **🌙 Consultar disponibilidad nocturna** — N2/N3 de una semana.
-2. **📋 Generar semana siguiente** — flujo completo: vista previa de la rotación,
-   confirmación, y generación del Control actualizado + Matriz + cuadro resumen.
+2. **📋 Generar semana siguiente** — flujo completo: detecta y propone la fecha,
+   vista previa de la rotación, confirmación, y actualización del Control + Matriz
+   (y, opcionalmente, el cuadro resumen).
 3. **⚙ Configurar rutas de archivos** — auto-detección o ruta manual.
 
 La herramienta **auto-detecta** los dos Excel en `~/Downloads`, `~/Desktop` y
@@ -140,6 +148,7 @@ céntimos al mes para este volumen).
 |-------|-------------|
 | `ruta_pmp` / `ruta_matriz` | Rutas a los dos Excel (auto-detectadas). |
 | `rotacion_pmp` | Orden de rotación de los 3 ingenieros. |
+| `clientes_celula3` | Clientes que rota la Célula 3 (se buscan por nombre al leer). |
 | `rotacion_n2` / `fecha_base_n2` | Rotación N2 y fecha base para el cálculo de respaldo. |
 | `rotacion_n3` | Orden de respaldo de escalamiento N3. |
 | `horario_tarde` | Clientes que se atienden en jornada de tarde. |
