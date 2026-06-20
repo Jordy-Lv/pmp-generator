@@ -473,6 +473,12 @@ def auto_detectar_inicio(cfg: dict) -> None:
     lineas: List[Text] = []
     for clave, patron, desc in [("ruta_pmp", "PMP", "Control de Gestión PMP"),
                                  ("ruta_matriz", "Matriz", "Matriz Unificada")]:
+        # Para el Control, preferir siempre la copia con la semana más avanzada
+        # (incluye las salidas «_actualizado_» de semanas ya generadas).
+        if clave == "ruta_pmp":
+            mejor = control_mas_reciente(cfg)
+            if mejor and mejor != str(Path(cfg.get(clave, "") or mejor).resolve()):
+                cfg[clave] = mejor; guardar_cfg(cfg)
         actual = cfg.get(clave, "")
         if actual and Path(actual).is_file():
             lineas.append(Text.assemble(("✓ ", "green"), (f"{desc}: ", "bold"),
@@ -702,6 +708,47 @@ def siguiente_lunes_en_pmp(ruta_pmp: str) -> Optional[date]:
     ws = wb["2026"]
     headers = _headers_semana_pmp(ws)
     return max((lunes for _, lunes in headers), default=None) + timedelta(days=7) if headers else None
+
+
+def _ultima_semana_pmp(ruta: str) -> Optional[date]:
+    """Última semana (lunes) registrada en la pestaña '2026' de un Control, o None
+    si no se puede leer o no tiene semanas. Tolerante: nunca lanza."""
+    try:
+        from openpyxl import load_workbook
+        ws = load_workbook(ruta, read_only=True, data_only=False)["2026"]
+        headers = _headers_semana_pmp(ws)
+    except Exception:
+        return None
+    return max((lunes for _, lunes in headers), default=None)
+
+
+def control_mas_reciente(cfg: dict) -> Optional[str]:
+    """Entre todos los Control candidatos —los detectados en las carpetas habituales,
+    los de la carpeta del Control configurado (ahí viven las salidas «_actualizado_»)
+    y el propio configurado—, devuelve la ruta del que tiene la semana MÁS avanzada.
+    Así el flujo siempre parte de la copia más actualizada aunque haya varias copias.
+    None si ninguno es legible."""
+    candidatos: Dict[str, Path] = {}
+    for p in buscar_excels("PMP"):
+        candidatos[str(p.resolve())] = p
+    actual = cfg.get("ruta_pmp", "")
+    if actual and Path(actual).is_file():
+        ap = Path(actual)
+        candidatos[str(ap.resolve())] = ap
+        try:
+            for q in ap.parent.glob("*.xlsx"):
+                if "pmp" in q.name.lower() and not q.name.startswith("~$"):
+                    candidatos[str(q.resolve())] = q
+        except OSError:
+            pass
+    mejor, mejor_sem = None, None
+    for ruta in candidatos:
+        sem = _ultima_semana_pmp(ruta)
+        if sem is None:
+            continue
+        if mejor_sem is None or sem > mejor_sem:
+            mejor, mejor_sem = ruta, sem
+    return mejor
 
 
 def diagnostico_fecha(ruta_pmp: str, lunes_sig: date) -> Tuple[bool, Optional[str], Optional[date]]:
@@ -1018,7 +1065,21 @@ def modo_pmp(cfg: dict) -> None:
                         "[dim]Actualiza el Control PMP y la Matriz, y crea el cuadro resumen.[/]",
                         border_style="red", box=box.ROUNDED, expand=False))
 
-    # 1 · Resolver archivos primero (para poder sugerir la fecha correcta del Control)
+    # 1 · Resolver archivos primero (para poder sugerir la fecha correcta del Control).
+    #     Antes de nada, preferir SIEMPRE el Control con la semana más avanzada: tras
+    #     generar una semana, su salida («_actualizado_AAAAMMDD.xlsx») queda junto a la
+    #     fuente; sin esto se seguiría partiendo del archivo viejo y se propondría una
+    #     semana ya hecha. Así el flujo encadena solo.
+    mejor = control_mas_reciente(cfg)
+    if mejor:
+        prev = cfg.get("ruta_pmp", "")
+        prev_resuelto = str(Path(prev).resolve()) if prev and Path(prev).is_file() else ""
+        if mejor != prev_resuelto:
+            cfg["ruta_pmp"] = mejor
+            guardar_cfg(cfg)
+            if prev_resuelto:   # solo avisar si REEMPLAZA a un Control previo distinto
+                console.print(f"  [green]✓[/] Usando el Control más reciente: "
+                              f"[cyan]{_etiqueta_archivo(Path(mejor))}[/]")
     ruta_pmp = resolver_ruta(cfg, "ruta_pmp", "PMP", "Control de Gestión PMP", requerido=True)
     if not ruta_pmp:
         console.print("  [red]✗[/] Sin PMP no se puede generar."); return
