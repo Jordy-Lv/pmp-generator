@@ -17,11 +17,16 @@ genera la **siguiente** (solo hay que confirmar). A partir de los dos Excel real
   detecta hasta qué viernes está cubierta y **extiende** las semanas N2/N3
   viernes-viernes que falten. Si no está la Matriz, la disponibilidad se calcula
   por rotación.
-- **Cuadro resumen** (`PMP_Semana_AAAAMMDD.xlsx`): Excel formateado para compartir
-  al equipo. Es **opcional** (se pregunta al final).
+- **Cuadro resumen** (`PMP_Semana.xlsx`): Excel formateado para compartir al equipo.
+  Es **opcional** (se pregunta al final).
 
 El Control y el cuadro resumen salen de **una sola rotación**, así que coinciden.
-Todo se escribe en **copias** junto a los archivos fuente; los originales no se tocan.
+**Se trabaja sobre un único archivo:** el Control y la Matriz se **sobrescriben in
+situ** (no se generan copias nuevas cada semana). El guardado es **atómico** (se
+escribe a un temporal y se renombra), así un fallo a mitad nunca deja el archivo a
+medias. El cuadro resumen también usa un nombre fijo (`PMP_Semana.xlsx`) que se
+sobrescribe. La herramienta detecta sola la última semana del Control y genera la
+siguiente, encadenando sobre el mismo archivo.
 
 > **Para la persona que solo va a usar la herramienta:** ver **[GUIA_USO.md](GUIA_USO.md)**
 > (instalación por doble clic, sin tocar nada técnico).

@@ -63,16 +63,21 @@ quién está de N2 (incidentes) y N3 (escalamiento).
 
 ## 3. ¿Dónde quedan los archivos?
 
-Se guardan **junto a los Excel originales** (en la misma carpeta), con nombres
-nuevos para no pisar nada:
+La herramienta trabaja sobre **un solo archivo**: actualiza tu **Control** y tu
+**Matriz** directamente, sobre el mismo Excel (no crea una copia nueva cada
+semana). Cada semana se añade la siguiente sobre ese mismo archivo.
 
-- **Control actualizado**: `Control_Gestion_PMP_actualizado_AAAAMMDD.xlsx`
-- **Matriz actualizada**: `Matriz..._actualizada_AAAAMMDD.xlsx`
-- **Cuadro resumen** (solo si lo pediste, para compartir): `PMP_Semana_AAAAMMDD.xlsx`
+- **Control**: se actualiza el mismo `Control_Gestion_PMP....xlsx` que abriste.
+- **Matriz**: se actualiza la misma `Matriz....xlsx`.
+- **Cuadro resumen** (solo si lo pides, para compartir): `PMP_Semana.xlsx` —
+  nombre fijo, se reescribe cada vez (no se acumulan copias).
 
-Los archivos originales **no se modifican**. Al terminar, la herramienta te
-ofrece abrir el Control actualizado para que lo revises antes de subirlo a
-SharePoint.
+> El guardado es **seguro**: si algo fallara a mitad, tu archivo **no queda
+> dañado** (se conserva como estaba). Aun así, como ahora se modifica el archivo
+> directamente, conviene que tu copia de respaldo esté en SharePoint/OneDrive.
+
+Al terminar, la herramienta te ofrece abrir el Control para que lo revises antes
+de subirlo a SharePoint.
 
 ## 4. Si algo no sale bien
 

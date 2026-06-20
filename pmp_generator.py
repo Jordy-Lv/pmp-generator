@@ -223,6 +223,25 @@ def horario_predominante(clientes: List[str], cfg: dict) -> str:
     return max(set(horarios), key=horarios.count) if horarios else "Mañana (7:00–12:00)"
 
 
+def _guardar_wb(wb, destino) -> None:
+    """Guarda el workbook de forma ATÓMICA y SIN dejar copias: escribe a un temporal
+    en la misma carpeta y lo renombra sobre el destino (os.replace). Si el guardado
+    falla a mitad, el archivo de destino anterior queda intacto (no se corrompe).
+    Esto permite sobrescribir el mismo archivo de entrada con seguridad."""
+    destino = str(destino)
+    tmp = f"{destino}.tmp"
+    try:
+        wb.save(tmp)
+        os.replace(tmp, destino)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def generar_excel(lunes: date, asig: Dict[str, List[str]], n2: str, n3: Optional[str],
                   ausentes: List[str], cfg: dict, dir_destino: Path) -> str:
     """Genera el Excel formateado. Lo guarda en `dir_destino` (junto al PMP fuente)."""
@@ -319,9 +338,9 @@ def generar_excel(lunes: date, asig: Dict[str, List[str]], n2: str, n3: Optional
         ws2[f"A{r_}"] = k; ws2[f"B{r_}"] = v; ws2[f"A{r_}"].font = fnt(bold=True)
     ws2.column_dimensions["A"].width = 16; ws2.column_dimensions["B"].width = 50
 
-    nombre  = f"PMP_Semana_{lunes.strftime('%Y%m%d')}.xlsx"
-    destino = Path(dir_destino) / nombre
-    wb.save(destino)
+    # Nombre FIJO (sin fecha): se sobrescribe cada semana, no acumula copias.
+    destino = Path(dir_destino) / "PMP_Semana.xlsx"
+    _guardar_wb(wb, destino)
     return str(destino)
 
 
@@ -936,7 +955,7 @@ def actualizar_control_pmp(ruta_pmp: str, lunes: date, ausentes: List[str], cfg:
     destino = salida or str(Path(ruta_pmp).with_name(
         f"{Path(ruta_pmp).stem}_actualizado_{lunes.strftime('%Y%m%d')}.xlsx"
     ))
-    wb.save(destino)
+    _guardar_wb(wb, destino)
     return destino
 
 
@@ -985,7 +1004,7 @@ def asegurar_dispo_en_matriz(ruta_matriz: str, inicio: date, cfg: dict,
             destino = salida or str(Path(ruta_matriz).with_name(
                 f"{Path(ruta_matriz).stem}_actualizada_{inicio.strftime('%Y%m%d')}.xlsx"
             ))
-            wb.save(destino)
+            _guardar_wb(wb, destino)
             return destino
 
     rotacion_n3 = cfg.get("rotacion_n3") or []
@@ -1021,7 +1040,7 @@ def asegurar_dispo_en_matriz(ruta_matriz: str, inicio: date, cfg: dict,
     destino = salida or str(Path(ruta_matriz).with_name(
         f"{Path(ruta_matriz).stem}_actualizada_{inicio.strftime('%Y%m%d')}.xlsx"
     ))
-    wb.save(destino)
+    _guardar_wb(wb, destino)
     return destino
 
 
@@ -1152,13 +1171,14 @@ def modo_pmp(cfg: dict) -> None:
         console.print("  [dim]Cancelado — no se escribió ningún archivo.[/]"); return
 
     # 6 · A partir de la MISMA rotación: Control real + Matriz + cuadro resumen.
-    #     Todo se escribe en COPIAS junto a los archivos fuente; los originales no
-    #     se tocan. El Control es la operación con validaciones: si falla, se aborta
-    #     sin generar artefactos parciales para no confundir.
+    #     El Control y la Matriz se SOBRESCRIBEN sobre su mismo archivo (in-place, sin
+    #     generar copias nuevas): se pasa salida=ruta_* y el guardado es atómico
+    #     (temp + os.replace), así un fallo a mitad no corrompe el archivo. El Control
+    #     es la operación con validaciones: si falla, se aborta sin tocar nada.
     dir_destino = Path(ruta_pmp).resolve().parent
     try:
         with console.status("[green]Actualizando el Control PMP…", spinner="dots"):
-            control = actualizar_control_pmp(ruta_pmp, lunes_sig, ausentes, cfg)
+            control = actualizar_control_pmp(ruta_pmp, lunes_sig, ausentes, cfg, salida=ruta_pmp)
     except Exception as e:
         console.print(f"  [red]✗[/] No se pudo actualizar el Control PMP: {e}")
         return
@@ -1167,7 +1187,8 @@ def modo_pmp(cfg: dict) -> None:
     if ruta_matriz:
         try:
             with console.status("[green]Actualizando la Matriz de recursos…", spinner="dots"):
-                matriz = asegurar_dispo_en_matriz(ruta_matriz, lunes_sig - timedelta(days=3), cfg)
+                matriz = asegurar_dispo_en_matriz(ruta_matriz, lunes_sig - timedelta(days=3), cfg,
+                                                  salida=ruta_matriz)
             cob = cobertura_dispo(matriz or ruta_matriz)
             if cob:
                 console.print(f"  [dim]🌙 Disponibilidad nocturna cubierta hasta el "
