@@ -490,14 +490,11 @@ def _pedir_ruta_manual(cfg: dict, clave: str, descripcion: str, requerido: bool)
 def auto_detectar_inicio(cfg: dict) -> None:
     """Al arrancar: rellena en silencio las rutas únicas y muestra un panel-resumen."""
     lineas: List[Text] = []
+    # No se abre ningún Excel aquí (el menú debe aparecer al instante): solo se
+    # resuelven rutas. La preferencia por el Control con la semana más avanzada se
+    # aplica al GENERAR (modo_pmp), que es donde importa.
     for clave, patron, desc in [("ruta_pmp", "PMP", "Control de Gestión PMP"),
                                  ("ruta_matriz", "Matriz", "Matriz Unificada")]:
-        # Para el Control, preferir siempre la copia con la semana más avanzada
-        # (incluye las salidas «_actualizado_» de semanas ya generadas).
-        if clave == "ruta_pmp":
-            mejor = control_mas_reciente(cfg)
-            if mejor and mejor != str(Path(cfg.get(clave, "") or mejor).resolve()):
-                cfg[clave] = mejor; guardar_cfg(cfg)
         actual = cfg.get(clave, "")
         if actual and Path(actual).is_file():
             lineas.append(Text.assemble(("✓ ", "green"), (f"{desc}: ", "bold"),
@@ -642,11 +639,21 @@ def _cliente_de_fila(ws, r: int, cols_consultor: set) -> Optional[str]:
 
 
 def _headers_semana_pmp(ws) -> List[Tuple[int, date]]:
+    # Itera por filas (streaming) en vez de leer celda a celda con ws.cell(r, c):
+    # en modo read_only el acceso ALEATORIO por celda relee el archivo en cada
+    # llamada (O(n) por celda), lo que hacía que abrir el Control tardara ~10 s.
+    # iter_rows es secuencial y baja eso a ~0.2 s. row[1]=col B, row[3]=col D.
     headers: List[Tuple[int, date]] = []
-    for row in range(1, ws.max_row + 1):
-        valor = ws.cell(row, 4).value
-        if hasattr(valor, "date") and str(ws.cell(row, 2).value).strip() == "Consultor":
-            headers.append((row, valor.date()))
+    for row in ws.iter_rows():
+        if len(row) < 4:
+            continue
+        celda_fecha = row[3]            # columna D
+        fecha = celda_fecha.value
+        # OJO read_only: las celdas vacías son EmptyCell y NO tienen .row; por eso
+        # se toma el nº de fila de la celda de la fecha (que sí tiene valor) y solo
+        # cuando hay coincidencia.
+        if hasattr(fecha, "date") and str(row[1].value).strip() == "Consultor":
+            headers.append((celda_fecha.row, fecha.date()))
     return headers
 
 
