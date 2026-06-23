@@ -638,6 +638,92 @@ def _cliente_de_fila(ws, r: int, cols_consultor: set) -> Optional[str]:
     return None
 
 
+def _es_celda_festivo(celda) -> bool:
+    return isinstance(celda.value, str) and celda.value.strip().upper() == "FESTIVO"
+
+
+def _merge_festivo_en_col(ws, col: int, fila_desde: int, fila_hasta: int):
+    """Merge vertical 'FESTIVO' en la columna `col` dentro del bloque, o None."""
+    for m in ws.merged_cells.ranges:
+        if m.min_col == col == m.max_col and fila_desde <= m.min_row <= fila_hasta:
+            if _es_celda_festivo(ws.cell(m.min_row, col)):
+                return m
+    return None
+
+
+def _celda_festivo_ref(ws):
+    """Una celda 'FESTIVO' existente (esquina de su merge), para clonar su formato
+    al marcar días festivos nuevos. None si no hay ninguna en la hoja."""
+    for m in ws.merged_cells.ranges:
+        if _es_celda_festivo(ws.cell(m.min_row, m.min_col)):
+            return ws.cell(m.min_row, m.min_col)
+    return None
+
+
+def _rango_datos_bloque(ws, target_row: int, alto: int, date_cols: List[int]) -> Tuple[int, int]:
+    """Filas de datos del bloque (las que abarca un 'FESTIVO' de columna completa):
+    si el bloque ya trae algún FESTIVO se usa su extensión; si no, las filas que
+    tengan algún cliente en las columnas-día."""
+    fests = [m for m in ws.merged_cells.ranges
+             if m.min_col == m.max_col and target_row < m.min_row <= target_row + alto
+             and _es_celda_festivo(ws.cell(m.min_row, m.min_col))]
+    if fests:
+        return min(m.min_row for m in fests), max(m.max_row for m in fests)
+    filas = [r for r in range(target_row + 1, target_row + alto)
+             if any(isinstance(ws.cell(r, c).value, str) and ws.cell(r, c).value.strip()
+                    for c in date_cols)]
+    return target_row + 1, max(filas, default=target_row + alto - 1)
+
+
+def _quitar_festivo_col(ws, col: int, merge, cols_cons: set) -> None:
+    """Deshace un merge 'FESTIVO' en `col` y rellena cada fila con su cliente,
+    clonando el formato de la columna del mismo cliente (como un día normal)."""
+    filas = list(range(merge.min_row, merge.max_row + 1))
+    ws.unmerge_cells(str(merge))
+    for r in filas:
+        cli = _cliente_de_fila(ws, r, cols_cons)
+        d = ws.cell(r, col)
+        d.value = cli
+        # Al deshacer la combinación el día queda sin estilo: copiar el formato de la
+        # columna del MISMO cliente (negrita, centrado, color) para que se vea igual.
+        ref_col = next((c for c in range(col + 1, ws.max_column + 1)
+                        if c not in cols_cons and ws.cell(r, c).value == cli), None)
+        if ref_col:
+            ref = ws.cell(r, ref_col)
+            d._style = copy.copy(ref._style)
+            d.font = copy.copy(ref.font)
+            d.fill = copy.copy(ref.fill)
+            d.border = copy.copy(ref.border)
+            d.alignment = copy.copy(ref.alignment)
+            d.number_format = ref.number_format
+
+
+def _poner_festivo_col(ws, col: int, fila_ini: int, fila_fin: int, ref=None) -> None:
+    """Marca la columna `col` como 'FESTIVO': deshace merges previos en el rango,
+    limpia los valores, combina fila_ini..fila_fin y escribe 'FESTIVO', clonando el
+    formato de `ref` (una celda FESTIVO existente) o, si no hay, negrita + centrado."""
+    for m in list(ws.merged_cells.ranges):
+        if m.min_col == col == m.max_col and not (m.max_row < fila_ini or m.min_row > fila_fin):
+            ws.unmerge_cells(str(m))
+    for r in range(fila_ini, fila_fin + 1):
+        ws.cell(r, col).value = None
+    if fila_fin > fila_ini:
+        ws.merge_cells(start_row=fila_ini, start_column=col, end_row=fila_fin, end_column=col)
+    celda = ws.cell(fila_ini, col)
+    celda.value = "FESTIVO"
+    if ref is not None:
+        celda._style = copy.copy(ref._style)
+        celda.font = copy.copy(ref.font)
+        celda.fill = copy.copy(ref.fill)
+        celda.border = copy.copy(ref.border)
+        celda.alignment = copy.copy(ref.alignment)
+        celda.number_format = ref.number_format
+    else:
+        from openpyxl.styles import Font, Alignment
+        celda.font = Font(bold=True)
+        celda.alignment = Alignment(horizontal="center", vertical="center")
+
+
 def _headers_semana_pmp(ws) -> List[Tuple[int, date]]:
     # Itera por filas (streaming) en vez de leer celda a celda con ws.cell(r, c):
     # en modo read_only el acceso ALEATORIO por celda relee el archivo en cada
@@ -845,7 +931,11 @@ def actualizar_control_pmp(ruta_pmp: str, lunes: date, ausentes: List[str], cfg:
     la MISMA regla que `rotar()`, de modo que el Control actualizado coincide con
     el cuadro resumen incluso cuando hay ausentes (el cliente del ausente queda a
     cargo del siguiente disponible; el aviso visual "REASIGNAR" vive solo en el
-    cuadro resumen). Escribe siempre a una copia, nunca sobre el original.
+    cuadro resumen). Escribe en `salida` (si se omite, junto al original con sufijo
+    `_actualizado_<fecha>`). En el flujo normal `modo_pmp` pasa `salida=ruta_pmp`,
+    de modo que SOBRESCRIBE el mismo Control in-place; el guardado es atómico
+    (`_guardar_wb`: escribe a un temporal y reemplaza), así un fallo a mitad no deja
+    el archivo a medias.
     """
     from openpyxl import load_workbook
 
@@ -916,36 +1006,24 @@ def actualizar_control_pmp(ruta_pmp: str, lunes: date, ausentes: List[str], cfg:
                 if isinstance(v, str) and v.strip() and v.strip() != "Consultor":
                     ws.cell(row, c).value = None
 
-    # FESTIVO real: la columna del lunes suele ser una celda combinada "FESTIVO". Si
-    # el lunes nuevo NO es festivo en Colombia, se deshace la combinación y se rellena
-    # con el cliente de cada fila (como en una semana normal); si lo es, se conserva.
+    # FESTIVO por día: para CADA día hábil de la semana, la columna debe decir
+    # "FESTIVO" (celda combinada vertical) si la fecha es festiva en Colombia, y
+    # mostrar los clientes si no. El bloque se copió del anterior, así que cada
+    # columna puede venir como FESTIVO o con clientes según la semana origen → se
+    # ajusta en AMBOS sentidos. (Antes solo se trataba —y solo para quitar— el lunes,
+    # por lo que un día festivo entre semana, o un lunes festivo que el origen no
+    # traía marcado, quedaban con el cliente en vez de "FESTIVO".)
     if date_cols:
-        col_lunes = date_cols[0]
-        if not es_festivo(lunes):
-            for m in list(ws.merged_cells.ranges):
-                if (m.min_col == col_lunes == m.max_col
-                        and target_row <= m.min_row <= target_row + alto):
-                    celda = ws.cell(m.min_row, col_lunes)
-                    if isinstance(celda.value, str) and celda.value.strip().upper() == "FESTIVO":
-                        filas = list(range(m.min_row, m.max_row + 1))
-                        ws.unmerge_cells(str(m))
-                        for r in filas:
-                            cli = _cliente_de_fila(ws, r, cols_cons)
-                            d = ws.cell(r, col_lunes)
-                            d.value = cli
-                            # Al deshacer la celda combinada, el lunes queda sin estilo.
-                            # Copiar el formato de la columna del MISMO cliente (negrita,
-                            # centrado, color) para que se vea igual que los demás días.
-                            ref_col = next((c for c in range(col_lunes + 1, ws.max_column + 1)
-                                            if c not in cols_cons and ws.cell(r, c).value == cli), None)
-                            if ref_col:
-                                ref = ws.cell(r, ref_col)
-                                d._style = copy.copy(ref._style)
-                                d.font = copy.copy(ref.font)
-                                d.fill = copy.copy(ref.fill)
-                                d.border = copy.copy(ref.border)
-                                d.alignment = copy.copy(ref.alignment)
-                                d.number_format = ref.number_format
+        ref_festivo = _celda_festivo_ref(ws)
+        fila_ini, fila_fin = _rango_datos_bloque(ws, target_row, alto, date_cols)
+        for idx, col in enumerate(date_cols[:5]):
+            dia = lunes + timedelta(days=idx)
+            merge = _merge_festivo_en_col(ws, col, target_row, target_row + alto)
+            if es_festivo(dia):
+                if merge is None:
+                    _poner_festivo_col(ws, col, fila_ini, fila_fin, ref_festivo)
+            elif merge is not None:
+                _quitar_festivo_col(ws, col, merge, cols_cons)
 
     # Ancho de columna: al moverse la tabla-resumen de C3 a la columna L (más
     # estrecha que la M que usaba antes), los nombres salían cortados. Se igualan
@@ -1622,6 +1700,45 @@ def _selftest() -> None:
         assert ws2.cell(29, 2).value is None
         assert ws2.cell(29, 12).value is None
         assert ws2.cell(29, 5).value == "D1 Oracle"
+        # Lunes 29/06/2026 es festivo (San Pedro y San Pablo) → su columna = FESTIVO.
+        assert ws2.cell(26, 4).value == "FESTIVO", ws2.cell(26, 4).value
+
+    # ── Festivos en CUALQUIER día hábil: la semana del 30/03/2026 tiene Jueves
+    #    (02/04) y Viernes (03/04) Santo festivos; lun/mar/mié no. Cada día festivo
+    #    debe quedar "FESTIVO" (combinado) y los no festivos conservar su cliente.
+    with tempfile.TemporaryDirectory() as tmp3:
+        ruta = Path(tmp3) / "control_fest.xlsx"
+        wb = Workbook(); ws = wb.active; ws.title = "2026"
+        cols_dia = (4, 6, 8, 9, 14)
+
+        def _bloque_f(fila, lunes_b):
+            ws.cell(fila, 2).value = "Consultor"
+            ws.cell(fila, 12).value = "Consultor"
+            for i, col in enumerate(cols_dia):
+                ws.cell(fila, col).value = _fecha_excel(lunes_b + timedelta(days=i))
+            for fila_off in (1, 2):                  # 2 filas → el FESTIVO se combina
+                r = fila + fila_off
+                ws.cell(r, 2).value = "Mateo Florez"
+                ws.cell(r, 12).value = "Mateo Florez"
+                for col in cols_dia:                 # cliente en TODAS las columnas-día
+                    ws.cell(r, col).value = "HOMI Oracle"
+
+        _bloque_f(1, date(2026, 3, 16))
+        _bloque_f(13, date(2026, 3, 23))
+        wb.save(ruta)
+
+        out = Path(tmp3) / "out_fest.xlsx"
+        actualizar_control_pmp(str(ruta), date(2026, 3, 30), [], cfg, str(out))
+        wsf = load_workbook(out, data_only=False)["2026"]
+        # Bloque nuevo: header en fila 25, datos en 26-27.
+        assert wsf.cell(26, 4).value == "HOMI Oracle"   # lun 30/03 no festivo
+        assert wsf.cell(26, 6).value == "HOMI Oracle"   # mar 31/03 no festivo
+        assert wsf.cell(26, 8).value == "HOMI Oracle"   # mié 01/04 no festivo
+        assert wsf.cell(26, 9).value == "FESTIVO", wsf.cell(26, 9).value   # jue 02/04
+        assert wsf.cell(26, 14).value == "FESTIVO", wsf.cell(26, 14).value  # vie 03/04
+        # El FESTIVO del jueves se combinó verticalmente sobre las 2 filas de datos.
+        assert any(m.min_col == 9 == m.max_col and m.min_row == 26 and m.max_row == 27
+                   for m in wsf.merged_cells.ranges), "jueves FESTIVO sin merge vertical"
 
     print("self-test ok")
 
