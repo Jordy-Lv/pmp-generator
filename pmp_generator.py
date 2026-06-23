@@ -182,18 +182,24 @@ def calcular_dispo_fallback(lunes: date, cfg: dict) -> str:
     return orden[idx]
 
 
-def siguiente_disponible(nombre: str, rotacion: List[str], ausentes: List[str]) -> str:
-    """Siguiente consultor en la rotación que no esté ausente.
+def siguiente_disponible(nombre: str, rotacion: List[str], ausentes: List[str],
+                         cobertura: Optional[Dict[str, str]] = None) -> str:
+    """Siguiente consultor en la rotación. Si el siguiente está AUSENTE:
+      · si `cobertura` dice quién lo reemplaza (elegido por el usuario), devuelve ese
+        cubridor;
+      · si no, salta al siguiente disponible (comportamiento por defecto).
 
     Es la ÚNICA regla de rotación del proyecto: la usan tanto `rotar()` (que mueve
     las carteras en memoria para el cuadro resumen) como `actualizar_control_pmp()`
-    (que renombra los consultores dentro del Control real). Así ambos artefactos
-    rotan exactamente igual y nunca divergen. Sin ausentes equivale a "el siguiente".
+    (que renombra los consultores dentro del Control real). Ambos reciben la MISMA
+    `cobertura`, así los dos artefactos rotan idénticos y nunca divergen.
     """
     if nombre not in rotacion:
         return nombre
     n = len(rotacion)
     sig = (rotacion.index(nombre) + 1) % n
+    if rotacion[sig] in ausentes and cobertura and rotacion[sig] in cobertura:
+        return cobertura[rotacion[sig]]
     intentos = 0
     while rotacion[sig] in ausentes and intentos < n:
         sig = (sig + 1) % n
@@ -201,13 +207,15 @@ def siguiente_disponible(nombre: str, rotacion: List[str], ausentes: List[str]) 
     return rotacion[sig]
 
 
-def rotar(actuales: Dict[str, List[str]], ausentes: List[str], rotacion: List[str]) -> Dict[str, List[str]]:
-    """Mateo→Heiner→Estefania→Mateo. Si el destino está ausente, salta al siguiente."""
+def rotar(actuales: Dict[str, List[str]], ausentes: List[str], rotacion: List[str],
+          cobertura: Optional[Dict[str, str]] = None) -> Dict[str, List[str]]:
+    """Mateo→Heiner→Estefania→Mateo. Si el destino está ausente, lo cubre quien diga
+    `cobertura` (elegido por el usuario) o, en su defecto, el siguiente disponible."""
     nuevas: Dict[str, List[str]] = {ing: [] for ing in rotacion}
     for ing in rotacion:
         clientes = actuales.get(ing, [])
         if clientes:
-            nuevas[siguiente_disponible(ing, rotacion, ausentes)].extend(clientes)
+            nuevas[siguiente_disponible(ing, rotacion, ausentes, cobertura)].extend(clientes)
     return nuevas
 
 
@@ -395,6 +403,25 @@ def seleccionar_ausentes(ingenieros: List[str]) -> List[str]:
     return _ask(questionary.checkbox(
         "¿Alguien ausente esta semana?  (Espacio para marcar · Enter para confirmar)",
         choices=ingenieros, style=QS))
+
+
+def pedir_cobertura(rotacion: List[str], ausentes: List[str]) -> Dict[str, str]:
+    """Por cada ausente, pregunta QUIÉN cubre los PMP que esta semana le tocarían y
+    devuelve {ausente: cubridor}. Así la reasignación la decide el usuario (eligiendo
+    entre los presentes) en vez de saltar automáticamente al siguiente de la rotación.
+    Si solo queda un presente, lo asigna sin preguntar."""
+    presentes = [c for c in rotacion if c not in ausentes]
+    cobertura: Dict[str, str] = {}
+    if not presentes:
+        return cobertura
+    for aus in [a for a in ausentes if a in rotacion]:
+        if len(presentes) == 1:
+            cobertura[aus] = presentes[0]
+            console.print(f"  [dim]· {presentes[0]} cubre a {aus} (único disponible).[/]")
+        else:
+            cobertura[aus] = _ask(questionary.select(
+                f"¿Quién cubre los PMP de {aus} esta semana?", choices=presentes, style=QS))
+    return cobertura
 
 
 # ── Auto-detección de los Excel ───────────────────────────────────────────────
@@ -923,7 +950,8 @@ def _copiar_bloque(ws, fila_origen: int, fila_destino: int, alto: int = 21,
 
 
 def actualizar_control_pmp(ruta_pmp: str, lunes: date, ausentes: List[str], cfg: dict,
-                           salida: Optional[str] = None) -> str:
+                           salida: Optional[str] = None,
+                           cobertura: Optional[Dict[str, str]] = None) -> str:
     """Copia el último bloque semanal del Control PMP debajo y rota Célula 3.
 
     No reconstruye la tabla: conserva el formato real de Excel y solo toca el
@@ -997,7 +1025,7 @@ def actualizar_control_pmp(ruta_pmp: str, lunes: date, ausentes: List[str], cfg:
                 if isinstance(v, str) and v.strip() in set_rot:
                     actual = v.strip(); break
             if actual:
-                nuevo = siguiente_disponible(actual, rotacion, ausentes)
+                nuevo = siguiente_disponible(actual, rotacion, ausentes, cobertura)
                 for c in cols_cons:
                     ws.cell(row, c).value = nuevo
         else:
@@ -1214,8 +1242,9 @@ def modo_pmp(cfg: dict) -> None:
             console.print("  [dim]Cancelado — no se escribió ningún archivo.[/]"); return
     lunes_act = lunes_sig - timedelta(weeks=1)
 
-    # 3 · Ausentes
+    # 3 · Ausentes + cobertura (quién cubre a cada ausente, lo elige el usuario)
     ausentes = seleccionar_ausentes(cfg["rotacion_pmp"])
+    cobertura = pedir_cobertura(cfg["rotacion_pmp"], ausentes) if ausentes else {}
 
     # 4 · Leer el reparto actual de Célula 3 — por NOMBRE de cliente, robusto a que
     #     las columnas se hayan movido (tabla resumen en M o en L).
@@ -1229,7 +1258,7 @@ def modo_pmp(cfg: dict) -> None:
                       f"{', '.join(faltantes)} — revísalo en la vista previa.")
 
     # 4c · Rotar (regla determinista) + disponibilidad
-    nuevas = rotar(actuales, ausentes, cfg["rotacion_pmp"])
+    nuevas = rotar(actuales, ausentes, cfg["rotacion_pmp"], cobertura)
     n2 = n3 = None
     fuente_dispo = "cálculo automático"
     if ruta_matriz:
@@ -1263,7 +1292,8 @@ def modo_pmp(cfg: dict) -> None:
     dir_destino = Path(ruta_pmp).resolve().parent
     try:
         with console.status("[green]Actualizando el Control PMP…", spinner="dots"):
-            control = actualizar_control_pmp(ruta_pmp, lunes_sig, ausentes, cfg, salida=ruta_pmp)
+            control = actualizar_control_pmp(ruta_pmp, lunes_sig, ausentes, cfg, salida=ruta_pmp,
+                                             cobertura=cobertura)
     except Exception as e:
         console.print(f"  [red]✗[/] No se pudo actualizar el Control PMP: {e}")
         return
@@ -1359,7 +1389,9 @@ def _gestionar_personas(cfg: dict, clave: str, titulo: str, es_giro: bool) -> No
     lista); en N2/N3 define la secuencia de turnos. Solo edita la config; los
     nombres deben coincidir EXACTAMENTE con los del Excel para que la lectura y la
     rotación funcionen."""
+    nota = None
     while True:
+        banner()                                   # limpia la pantalla: no se apilan paneles
         lista: List[str] = cfg.setdefault(clave, [])
         cuerpo = Text()
         if lista:
@@ -1371,6 +1403,8 @@ def _gestionar_personas(cfg: dict, clave: str, titulo: str, es_giro: bool) -> No
             cuerpo.append("  (lista vacía)", style="yellow")
         console.print(Panel(cuerpo, title=f"👥  {titulo}", border_style="blue",
                             box=box.ROUNDED, expand=False, padding=(1, 2)))
+        if nota:
+            console.print(nota); nota = None
         accion = _ask(questionary.select(
             f"{titulo} — ¿qué hacer?",
             choices=[questionary.Choice("➕  Añadir consultor", "add"),
@@ -1383,24 +1417,24 @@ def _gestionar_personas(cfg: dict, clave: str, titulo: str, es_giro: bool) -> No
         if accion == "add":
             nombre = _pedir_nombre("Nombre del consultor (TAL CUAL aparece en el Excel):")
             if not nombre:
-                console.print("  [yellow]·[/] Sin cambios."); continue
+                nota = "  [yellow]·[/] Sin cambios."; continue
             if nombre in lista:
-                console.print(f"  [yellow]·[/] «{nombre}» ya está en la lista."); continue
+                nota = f"  [yellow]·[/] «{nombre}» ya está en la lista."; continue
             lista.append(nombre); guardar_cfg(cfg)
-            console.print(f"  [green]✓[/] Añadido «{nombre}» al final. Usa «Reordenar» si va en otra posición.")
+            nota = f"  [green]✓[/] Añadido «{nombre}» al final. Usa «Reordenar» si va en otra posición."
         elif accion == "del":
             if not lista:
-                console.print("  [yellow]·[/] La lista ya está vacía."); continue
+                nota = "  [yellow]·[/] La lista ya está vacía."; continue
             quien = _ask(questionary.select("¿A quién quitar?", choices=lista + [_CANCELAR], style=QS))
             if quien == _CANCELAR:
                 continue
             lista.remove(quien); guardar_cfg(cfg)
-            console.print(f"  [green]✓[/] Quitado «{quien}».")
+            nota = f"  [green]✓[/] Quitado «{quien}»."
             if es_giro and len(lista) < 2:
-                console.print("  [yellow]⚠[/] Con menos de 2 consultores el giro no rota.")
+                nota += "\n  [yellow]⚠[/] Con menos de 2 consultores el giro no rota."
         elif accion == "move":
             if len(lista) < 2:
-                console.print("  [yellow]·[/] Hacen falta al menos 2 para reordenar."); continue
+                nota = "  [yellow]·[/] Hacen falta al menos 2 para reordenar."; continue
             quien = _ask(questionary.select("¿Cuál mover?", choices=lista + [_CANCELAR], style=QS))
             if quien == _CANCELAR:
                 continue
@@ -1409,7 +1443,7 @@ def _gestionar_personas(cfg: dict, clave: str, titulo: str, es_giro: bool) -> No
                        [questionary.Choice(f"después de {c}", i + 1) for i, c in enumerate(otras)]
             pos = _ask(questionary.select(f"¿Dónde colocar a «{quien}»?", choices=destinos, style=QS))
             lista.remove(quien); lista.insert(int(pos), quien); guardar_cfg(cfg)
-            console.print("  [green]✓[/] Nuevo orden: " + " → ".join(lista))
+            nota = "  [green]✓[/] Nuevo orden: " + " → ".join(lista)
 
 
 def _set_atributos_cliente(cfg: dict, cliente: str) -> None:
@@ -1436,7 +1470,9 @@ def _gestionar_clientes(cfg: dict) -> None:
     """Añadir / quitar clientes de Célula 3 y editar sus atributos (horario, PMP
     largo). Solo edita la config: el cliente debe existir ya en el Excel con el
     MISMO nombre para que la herramienta lo lea y lo rote."""
+    nota = None
     while True:
+        banner()                                   # limpia la pantalla: no se apilan tablas
         clientes: List[str] = cfg.setdefault("clientes_celula3", [])
         tarde = set(cfg.get("horario_tarde", []))
         largos = set(cfg.get("clientes_largos", []))
@@ -1452,6 +1488,8 @@ def _gestionar_clientes(cfg: dict) -> None:
         else:
             tabla.add_row("", "[yellow](sin clientes)[/]", "", "")
         console.print(tabla)
+        if nota:
+            console.print(nota); nota = None
         accion = _ask(questionary.select(
             "Clientes de Célula 3 — ¿qué hacer?",
             choices=[questionary.Choice("➕  Añadir cliente", "add"),
@@ -1464,16 +1502,16 @@ def _gestionar_clientes(cfg: dict) -> None:
         if accion == "add":
             nombre = _pedir_nombre("Nombre del cliente (TAL CUAL aparece en el Excel):")
             if not nombre:
-                console.print("  [yellow]·[/] Sin cambios."); continue
+                nota = "  [yellow]·[/] Sin cambios."; continue
             if nombre in clientes:
-                console.print(f"  [yellow]·[/] «{nombre}» ya está en la lista."); continue
+                nota = f"  [yellow]·[/] «{nombre}» ya está en la lista."; continue
             clientes.append(nombre)
             _set_atributos_cliente(cfg, nombre)
             guardar_cfg(cfg)
-            console.print(f"  [green]✓[/] Añadido «{nombre}».")
+            nota = f"  [green]✓[/] Añadido «{nombre}»."
         elif accion in ("del", "edit"):
             if not clientes:
-                console.print("  [yellow]·[/] No hay clientes."); continue
+                nota = "  [yellow]·[/] No hay clientes."; continue
             verbo = "quitar" if accion == "del" else "editar"
             quien = _ask(questionary.select(f"¿Qué cliente {verbo}?",
                                             choices=clientes + [_CANCELAR], style=QS))
@@ -1484,15 +1522,16 @@ def _gestionar_clientes(cfg: dict) -> None:
                 cfg["horario_tarde"] = [c for c in cfg.get("horario_tarde", []) if c != quien]
                 cfg["clientes_largos"] = [c for c in cfg.get("clientes_largos", []) if c != quien]
                 guardar_cfg(cfg)
-                console.print(f"  [green]✓[/] Quitado «{quien}» (y sus atributos).")
+                nota = f"  [green]✓[/] Quitado «{quien}» (y sus atributos)."
             else:
                 _set_atributos_cliente(cfg, quien)
                 guardar_cfg(cfg)
-                console.print(f"  [green]✓[/] Atributos de «{quien}» actualizados.")
+                nota = f"  [green]✓[/] Atributos de «{quien}» actualizados."
 
 
 def modo_config(cfg: dict) -> None:
     while True:
+        banner()                                   # limpia la pantalla en cada vuelta
         console.print(Panel(f"⚙  Configuración\n[dim]Se guarda en {CONFIG_PATH}[/]",
                             border_style="blue", box=box.ROUNDED, expand=False))
         op = _ask(questionary.select(
@@ -1599,6 +1638,14 @@ def _selftest() -> None:
     assert siguiente_disponible("Mateo Florez", rot, []) == "Estefania Sanabria"
     assert siguiente_disponible("Estefania Sanabria", rot, []) == "Heiner Diaz"
     assert siguiente_disponible("Estefania Sanabria", rot, ["Heiner Diaz"]) == "Mateo Florez"
+    # Cobertura explícita: el destino que sería un ausente lo toma quien diga la
+    # cobertura (elección del usuario), NO el salto automático al siguiente.
+    assert siguiente_disponible("Estefania Sanabria", rot, ["Heiner Diaz"],
+                                {"Heiner Diaz": "Estefania Sanabria"}) == "Estefania Sanabria"
+    rc = rotar({"Mateo Florez": ["A"], "Heiner Diaz": ["B"], "Estefania Sanabria": ["C"]},
+               ["Heiner Diaz"], rot, {"Heiner Diaz": "Estefania Sanabria"})
+    assert rc["Mateo Florez"] == ["B"] and rc["Estefania Sanabria"] == ["A", "C"] \
+        and rc["Heiner Diaz"] == [], rc
 
     # Festivos de Colombia (deterministas): los que de hecho aparecen en el Control.
     assert es_festivo(date(2026, 6, 8))     # Corpus Christi (trasladado)

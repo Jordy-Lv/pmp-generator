@@ -49,6 +49,8 @@ Al abrir se ve un menú. Te mueves con las **flechas ↑ ↓** y eliges con **En
    con las flechas.
 4. Te pregunta si **alguien está ausente** esa semana. Marca con la **barra
    espaciadora** a quien corresponda (o ninguno) y pulsa **Enter**.
+   - Si marcas a alguien, te preguntará **quién cubre sus PMP** esa semana y eliges
+     entre los presentes (ya no se reasignan a uno automáticamente).
 5. Aparece una **vista previa** de cómo queda la rotación. Revísala.
 6. Confirma con **Enter**. Se actualiza el Control (copiando la semana tal cual y
    rotando solo a los encargados de Célula 3) y la Matriz de disponibilidad.
