@@ -1237,8 +1237,8 @@ def modo_pmp(cfg: dict) -> None:
         abrir_archivo(resumen)
 
 
-def modo_config(cfg: dict) -> None:
-    console.print(Panel(f"⚙  Configuración de rutas\n[dim]Se guardan en {CONFIG_PATH}[/]",
+def _config_rutas(cfg: dict) -> None:
+    console.print(Panel(f"📁  Rutas de archivos\n[dim]Se guardan en {CONFIG_PATH}[/]",
                         border_style="blue", box=box.ROUNDED, expand=False))
 
     def _editar(clave: str, desc: str, patron: str, requerido: bool) -> None:
@@ -1263,7 +1263,183 @@ def modo_config(cfg: dict) -> None:
     _editar("ruta_pmp", "Control de Gestión PMP", "PMP", True)
     _editar("ruta_matriz", "Matriz Unificada", "Matriz", False)
     guardar_cfg(cfg)
-    console.print("  [green]✓[/] Configuración guardada.")
+    console.print("  [green]✓[/] Rutas guardadas.")
+
+
+def _pedir_nombre(prompt: str) -> str:
+    """Pide un nombre y normaliza espacios. Cadena vacía = cancelar/sin cambios."""
+    return " ".join(_ask(questionary.text(prompt, style=QS)).split())
+
+
+# Sentinela para las opciones "cancelar" de los select de abajo.
+_CANCELAR = "↩  cancelar"
+
+
+def _gestionar_personas(cfg: dict, clave: str, titulo: str, es_giro: bool) -> None:
+    """Añadir / quitar / reordenar una lista de consultores (rotación PMP, N2 o N3).
+    El ORDEN importa: en PMP define el giro (cada cliente pasa al SIGUIENTE de la
+    lista); en N2/N3 define la secuencia de turnos. Solo edita la config; los
+    nombres deben coincidir EXACTAMENTE con los del Excel para que la lectura y la
+    rotación funcionen."""
+    while True:
+        lista: List[str] = cfg.setdefault(clave, [])
+        cuerpo = Text()
+        if lista:
+            for i, n in enumerate(lista, 1):
+                cuerpo.append(f"  {i}. {n}\n")
+            if es_giro and len(lista) >= 2:
+                cuerpo.append("\n  Giro: " + " → ".join(lista) + " → " + lista[0], style="dim")
+        else:
+            cuerpo.append("  (lista vacía)", style="yellow")
+        console.print(Panel(cuerpo, title=f"👥  {titulo}", border_style="blue",
+                            box=box.ROUNDED, expand=False, padding=(1, 2)))
+        accion = _ask(questionary.select(
+            f"{titulo} — ¿qué hacer?",
+            choices=[questionary.Choice("➕  Añadir consultor", "add"),
+                     questionary.Choice("➖  Quitar consultor", "del"),
+                     questionary.Choice("↕   Reordenar", "move"),
+                     questionary.Choice("↩   Volver", "back")],
+            style=QS))
+        if accion == "back":
+            return
+        if accion == "add":
+            nombre = _pedir_nombre("Nombre del consultor (TAL CUAL aparece en el Excel):")
+            if not nombre:
+                console.print("  [yellow]·[/] Sin cambios."); continue
+            if nombre in lista:
+                console.print(f"  [yellow]·[/] «{nombre}» ya está en la lista."); continue
+            lista.append(nombre); guardar_cfg(cfg)
+            console.print(f"  [green]✓[/] Añadido «{nombre}» al final. Usa «Reordenar» si va en otra posición.")
+        elif accion == "del":
+            if not lista:
+                console.print("  [yellow]·[/] La lista ya está vacía."); continue
+            quien = _ask(questionary.select("¿A quién quitar?", choices=lista + [_CANCELAR], style=QS))
+            if quien == _CANCELAR:
+                continue
+            lista.remove(quien); guardar_cfg(cfg)
+            console.print(f"  [green]✓[/] Quitado «{quien}».")
+            if es_giro and len(lista) < 2:
+                console.print("  [yellow]⚠[/] Con menos de 2 consultores el giro no rota.")
+        elif accion == "move":
+            if len(lista) < 2:
+                console.print("  [yellow]·[/] Hacen falta al menos 2 para reordenar."); continue
+            quien = _ask(questionary.select("¿Cuál mover?", choices=lista + [_CANCELAR], style=QS))
+            if quien == _CANCELAR:
+                continue
+            otras = [c for c in lista if c != quien]
+            destinos = [questionary.Choice("al principio", 0)] + \
+                       [questionary.Choice(f"después de {c}", i + 1) for i, c in enumerate(otras)]
+            pos = _ask(questionary.select(f"¿Dónde colocar a «{quien}»?", choices=destinos, style=QS))
+            lista.remove(quien); lista.insert(int(pos), quien); guardar_cfg(cfg)
+            console.print("  [green]✓[/] Nuevo orden: " + " → ".join(lista))
+
+
+def _set_atributos_cliente(cfg: dict, cliente: str) -> None:
+    """Pregunta horario (mañana/tarde) y si es PMP largo, y sincroniza las listas
+    horario_tarde / clientes_largos para `cliente` (usadas en el cuadro resumen)."""
+    horario = _ask(questionary.select(
+        f"Horario de «{cliente}»:",
+        choices=[questionary.Choice("Mañana (7:00–12:00)", "manana"),
+                 questionary.Choice("Tarde (12:00–17:00)", "tarde")],
+        style=QS))
+    largo = confirmar(f"¿«{cliente}» es PMP largo?",
+                      default=cliente in set(cfg.get("clientes_largos", [])))
+    tarde = [c for c in cfg.get("horario_tarde", []) if c != cliente]
+    if horario == "tarde":
+        tarde.append(cliente)
+    cfg["horario_tarde"] = tarde
+    largos = [c for c in cfg.get("clientes_largos", []) if c != cliente]
+    if largo:
+        largos.append(cliente)
+    cfg["clientes_largos"] = largos
+
+
+def _gestionar_clientes(cfg: dict) -> None:
+    """Añadir / quitar clientes de Célula 3 y editar sus atributos (horario, PMP
+    largo). Solo edita la config: el cliente debe existir ya en el Excel con el
+    MISMO nombre para que la herramienta lo lea y lo rote."""
+    while True:
+        clientes: List[str] = cfg.setdefault("clientes_celula3", [])
+        tarde = set(cfg.get("horario_tarde", []))
+        largos = set(cfg.get("clientes_largos", []))
+        tabla = Table(box=box.SIMPLE, expand=False, title="🧾  Clientes de Célula 3")
+        tabla.add_column("#", justify="right", style="dim")
+        tabla.add_column("Cliente")
+        tabla.add_column("Horario")
+        tabla.add_column("PMP largo", justify="center")
+        if clientes:
+            for i, c in enumerate(clientes, 1):
+                tabla.add_row(str(i), c, "Tarde" if c in tarde else "Mañana",
+                              "Sí" if c in largos else "—")
+        else:
+            tabla.add_row("", "[yellow](sin clientes)[/]", "", "")
+        console.print(tabla)
+        accion = _ask(questionary.select(
+            "Clientes de Célula 3 — ¿qué hacer?",
+            choices=[questionary.Choice("➕  Añadir cliente", "add"),
+                     questionary.Choice("➖  Quitar cliente", "del"),
+                     questionary.Choice("✎   Editar horario / PMP largo", "edit"),
+                     questionary.Choice("↩   Volver", "back")],
+            style=QS))
+        if accion == "back":
+            return
+        if accion == "add":
+            nombre = _pedir_nombre("Nombre del cliente (TAL CUAL aparece en el Excel):")
+            if not nombre:
+                console.print("  [yellow]·[/] Sin cambios."); continue
+            if nombre in clientes:
+                console.print(f"  [yellow]·[/] «{nombre}» ya está en la lista."); continue
+            clientes.append(nombre)
+            _set_atributos_cliente(cfg, nombre)
+            guardar_cfg(cfg)
+            console.print(f"  [green]✓[/] Añadido «{nombre}».")
+        elif accion in ("del", "edit"):
+            if not clientes:
+                console.print("  [yellow]·[/] No hay clientes."); continue
+            verbo = "quitar" if accion == "del" else "editar"
+            quien = _ask(questionary.select(f"¿Qué cliente {verbo}?",
+                                            choices=clientes + [_CANCELAR], style=QS))
+            if quien == _CANCELAR:
+                continue
+            if accion == "del":
+                clientes.remove(quien)
+                cfg["horario_tarde"] = [c for c in cfg.get("horario_tarde", []) if c != quien]
+                cfg["clientes_largos"] = [c for c in cfg.get("clientes_largos", []) if c != quien]
+                guardar_cfg(cfg)
+                console.print(f"  [green]✓[/] Quitado «{quien}» (y sus atributos).")
+            else:
+                _set_atributos_cliente(cfg, quien)
+                guardar_cfg(cfg)
+                console.print(f"  [green]✓[/] Atributos de «{quien}» actualizados.")
+
+
+def modo_config(cfg: dict) -> None:
+    while True:
+        console.print(Panel(f"⚙  Configuración\n[dim]Se guarda en {CONFIG_PATH}[/]",
+                            border_style="blue", box=box.ROUNDED, expand=False))
+        op = _ask(questionary.select(
+            "¿Qué quieres configurar?",
+            choices=[
+                questionary.Choice("📁  Rutas de archivos (Control / Matriz)", "rutas"),
+                questionary.Choice("👥  Consultores — rotación PMP (Célula 3)", "pmp"),
+                questionary.Choice("🌙  Consultores — N2 (incidentes nocturnos)", "n2"),
+                questionary.Choice("🌙  Consultores — N3 (escalamiento)", "n3"),
+                questionary.Choice("🧾  Clientes de Célula 3 (rotación + horario)", "cli"),
+                questionary.Choice("↩   Volver al menú", "back"),
+            ],
+            style=QS))
+        if op == "back":
+            return
+        if op == "rutas":
+            _config_rutas(cfg)
+        elif op == "pmp":
+            _gestionar_personas(cfg, "rotacion_pmp", "Rotación PMP (Célula 3)", es_giro=True)
+        elif op == "n2":
+            _gestionar_personas(cfg, "rotacion_n2", "Rotación N2 (incidentes nocturnos)", es_giro=True)
+        elif op == "n3":
+            _gestionar_personas(cfg, "rotacion_n3", "Rotación N3 (escalamiento)", es_giro=True)
+        elif op == "cli":
+            _gestionar_clientes(cfg)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1287,7 +1463,7 @@ def menu(cfg: dict) -> None:
                 choices=[
                     questionary.Choice("🌙  Consultar disponibilidad nocturna", "1"),
                     questionary.Choice("📋  Generar semana siguiente", "2"),
-                    questionary.Choice("⚙   Configurar rutas de archivos", "3"),
+                    questionary.Choice("⚙   Configurar (rutas · consultores · clientes)", "3"),
                     questionary.Choice("🚪  Salir", "0"),
                 ],
                 style=QS, qmark="›", pointer="❯").unsafe_ask()

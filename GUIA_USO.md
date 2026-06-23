@@ -59,6 +59,18 @@ Al abrir se ve un menú. Te mueves con las **flechas ↑ ↓** y eliges con **En
 Elige **🌙 Consultar disponibilidad nocturna**, indica la semana, y te muestra
 quién está de N2 (incidentes) y N3 (escalamiento).
 
+### Cambiar consultores o clientes
+Elige **⚙ Configurar** para abrir un submenú donde puedes:
+- **Consultores** — añadir, quitar o reordenar las rotaciones **PMP** (Célula 3),
+  **N2** y **N3**. En la rotación PMP el **orden** decide el giro (quién pasa los
+  clientes a quién), y la pantalla te muestra ese giro para que lo confirmes.
+- **Clientes de Célula 3** — añadir o quitar clientes de la tabla y marcar su
+  **horario** (mañana/tarde) y si es **"PMP largo"**.
+
+> Importante: el nombre que escribas debe ser **idéntico** al que aparece en el
+> Excel (mismas mayúsculas, tildes y paréntesis). Esto solo cambia la
+> configuración; no agrega ni borra filas dentro del Excel.
+
 ---
 
 ## 3. ¿Dónde quedan los archivos?
@@ -81,7 +93,7 @@ de subirlo a SharePoint.
 
 ## 4. Si algo no sale bien
 
-- **No encuentra los Excel**: entra a **⚙ Configurar rutas de archivos** y
+- **No encuentra los Excel**: entra a **⚙ Configurar → Rutas de archivos** y
   selecciona los archivos a mano. Quedan recordados para la próxima vez.
 - **Dice que "ya existe un bloque" o que la semana no es la siguiente**: revisa
   que la fecha sea la del lunes correcto, justo la semana posterior a la última

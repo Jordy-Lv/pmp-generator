@@ -41,7 +41,14 @@ Al abrir la herramienta aparece un menú con flechas:
 2. **📋 Generar semana siguiente** — flujo completo: detecta y propone la fecha,
    vista previa de la rotación, confirmación, y actualización del Control + Matriz
    (y, opcionalmente, el cuadro resumen).
-3. **⚙ Configurar rutas de archivos** — auto-detección o ruta manual.
+3. **⚙ Configurar** — un submenú para:
+   - **Rutas de archivos** (Control / Matriz): auto-detección o ruta manual.
+   - **Consultores**: añadir / quitar / reordenar las rotaciones **PMP** (Célula 3),
+     **N2** (incidentes) y **N3** (escalamiento). En PMP el orden define el giro.
+   - **Clientes de Célula 3**: añadir / quitar clientes que rota la tabla y marcar su
+     **horario** (mañana/tarde) y si es **"PMP largo"**.
+   - *Solo edita la configuración (`~/.pmp_celula3.json`); los nombres deben coincidir
+     con los del Excel. No inserta ni borra filas en el Excel.*
 
 La herramienta **auto-detecta** los dos Excel en `~/Downloads`, `~/Desktop` y
 `~/Documents` (y un nivel de subcarpetas). Si hay un único candidato lo usa; si
