@@ -1,10 +1,10 @@
 # PMP Generator — Célula 3
 
 Herramienta de terminal que **arma sola el PMP de la semana siguiente** para el
-equipo de la Célula 3 (giro **Mateo → Heiner → Estefania → Mateo**). Lee los dos
-Excel reales, rota a los encargados, marca los festivos y deja todo listo para
-subir a SharePoint. Es **100 % offline y determinista**: no usa internet, ni claves
-de API, ni servicios externos.
+equipo de la Célula 3 (giro **Mateo → Heiner → Estefania → Mateo**). Lee el Excel
+del **Control de Gestión PMP**, rota a los encargados, marca los festivos y deja
+todo listo para subir a SharePoint. Es **100 % offline y determinista**: no usa
+internet, ni claves de API, ni servicios externos.
 
 > **¿Solo vas a usar la herramienta (no instalarla)?** Salta a
 > **[GUIA_USO.md](GUIA_USO.md)**: descargar, doble clic y listo.
@@ -27,19 +27,17 @@ de API, ni servicios externos.
 
 Al abrir aparece un menú con flechas (↑ ↓ + Enter):
 
-1. **🌙 Consultar disponibilidad nocturna** — muestra N2 (incidentes) y N3
-   (escalamiento) de una semana, leídos de la Matriz.
-2. **📋 Generar semana siguiente** — el flujo principal:
+1. **📋 Generar semana siguiente** — el flujo principal:
    - Detecta **sola** la última semana del Control y propone la **siguiente** (no
      escribes fechas, solo confirmas).
    - Te pregunta si **alguien está ausente** y, si lo hay, **quién cubre** sus PMP.
-   - Muestra una **vista previa** y, al confirmar, actualiza el **Control** y la
-     **Matriz**, y (opcional) genera un **cuadro resumen** para compartir.
-3. **⚙ Configurar** — rutas de los Excel, consultores (rotaciones PMP / N2 / N3) y
-   clientes de Célula 3 (con su horario y si es "PMP largo").
+   - Muestra una **vista previa** y, al confirmar, actualiza el **Control** y
+     (opcional) genera un **cuadro resumen** para compartir.
+2. **⚙ Configurar** — el archivo del Control, los consultores (rotación PMP de
+   Célula 3) y los clientes de Célula 3 (con su horario y si es "PMP largo").
 
-**Sobre los archivos:** trabaja **sobre un único archivo** — el Control y la Matriz
-se **sobrescriben in situ** (no crea una copia nueva cada semana). El guardado es
+**Sobre los archivos:** trabaja **sobre un único archivo** — el Control se
+**sobrescribe in situ** (no crea una copia nueva cada semana). El guardado es
 **atómico** (escribe a un temporal y lo renombra), así un fallo a mitad nunca deja
 el archivo dañado. El cuadro resumen, si lo pides, se guarda como `PMP_Semana.xlsx`
 (nombre fijo, se reescribe).
@@ -139,20 +137,17 @@ pmp
 
 ## 3. Puesta en marcha (dejarla funcionando)
 
-1. **Coloca los dos Excel** en una de estas carpetas (o una subcarpeta directa):
-   `~/Downloads`, `~/Desktop` o `~/Documents`.
-   - El Control debe llamarse algo con **`Control_Gestion_PMP`** y tener la pestaña
-     **`2026`**.
-   - La Matriz debe contener **`Matriz`** en el nombre y la pestaña
-     **`ROTACION DISPO CELULA 3 `**.
+1. **Coloca el Excel del Control** en una de estas carpetas (o una subcarpeta
+   directa): `~/Downloads`, `~/Desktop` o `~/Documents`. Debe llamarse algo con
+   **`Control_Gestion_PMP`** y tener la pestaña **`2026`**.
 2. **Abre la herramienta** (`pmp`, o el ejecutable). Verás un panel **«Detección de
-   archivos»** que confirma que encontró el Control y la Matriz. Si hay varios
-   candidatos te deja elegir; si no encuentra, entra a **⚙ Configurar → Rutas** y
-   selecciónalos a mano (quedan recordados).
+   archivos»** que confirma que encontró el Control. Si hay varios candidatos te
+   deja elegir; si no encuentra, entra a **⚙ Configurar → Archivo del Control** y
+   selecciónalo a mano (queda recordado).
 3. **Revisa consultores y clientes** en **⚙ Configurar**:
    - **Consultores → rotación PMP**: confirma que el orden del **giro** sea el
      correcto (la pantalla muestra `A → B → C → A`). Ajusta con añadir/quitar/
-     reordenar. Igual para **N2** y **N3** si aplica.
+     reordenar.
    - **Clientes de Célula 3**: revisa la lista, el **horario** (mañana/tarde) y los
      marcados como **«PMP largo»**.
    - Los nombres deben coincidir **exactamente** con los del Excel (mayúsculas,
@@ -161,8 +156,9 @@ pmp
    previa** con calma → si algo no cuadra, cancela (no escribe nada). Cuando esté
    bien, confirma.
 
-> La configuración (rutas, rotaciones, clientes) vive en `~/.pmp_celula3.json`, que
-> es **propio de cada máquina**. Ver [6. Configuración](#6-configuración-referencia).
+> La configuración (ruta del Control, rotación, clientes) vive en
+> `~/.pmp_celula3.json`, que es **propio de cada máquina**. Ver
+> [6. Configuración](#6-configuración-referencia).
 
 ---
 
@@ -173,8 +169,8 @@ pmp
 3. Confirma la fecha propuesta (la siguiente a la última del Control).
 4. Marca ausentes si los hay y elige **quién los cubre**.
 5. Revisa la **vista previa** y confirma.
-6. La herramienta actualiza el Control y la Matriz; al terminar te ofrece **abrir el
-   Control** para que lo revises antes de **subirlo a SharePoint**.
+6. La herramienta actualiza el Control; al terminar te ofrece **abrir el Control**
+   para que lo revises antes de **subirlo a SharePoint**.
 
 ---
 
@@ -222,11 +218,9 @@ Se guarda en `~/.pmp_celula3.json` y se edita cómodamente desde **⚙ Configura
 
 | Clave | Significado |
 |-------|-------------|
-| `ruta_pmp` / `ruta_matriz` | Rutas a los dos Excel (auto-detectadas). |
+| `ruta_pmp` | Ruta al Excel del Control (auto-detectada). |
 | `rotacion_pmp` | Orden del giro de los consultores de Célula 3. |
 | `clientes_celula3` | Clientes que rota la Célula 3 (se buscan por nombre al leer). |
-| `rotacion_n2` / `fecha_base_n2` | Rotación N2 y fecha base para el cálculo de respaldo. |
-| `rotacion_n3` | Orden de escalamiento N3. |
 | `horario_tarde` | Clientes que se atienden en jornada de tarde. |
 | `clientes_largos` | Clientes marcados como "PMP largo". |
 
@@ -234,7 +228,7 @@ Se guarda en `~/.pmp_celula3.json` y se edita cómodamente desde **⚙ Configura
 
 ## 7. Problemas frecuentes
 
-- **«No encuentra los Excel»** → ⚙ Configurar → Rutas → selecciónalos a mano.
+- **«No encuentra el Control»** → ⚙ Configurar → Archivo del Control → selecciónalo a mano.
   Verifica que estén en Downloads/Desktop/Documents y con el nombre esperado.
 - **«Ya existe un bloque» o «no es la semana siguiente»** → la fecha debe ser el
   lunes justo posterior a la última semana del Control. Revisa que estés usando el

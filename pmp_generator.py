@@ -95,13 +95,9 @@ class Volver(Exception):
 CONFIG_PATH = Path.home() / ".pmp_celula3.json"
 DEFAULT_CFG: dict = {
     "ruta_pmp":        "",
-    "ruta_matriz":     "",
     # Orden del giro semanal: cada cliente de Célula 3 pasa de su encargado actual
     # al SIGUIENTE de esta lista (Heiner→Mateo→Estefania→Heiner).
     "rotacion_pmp":    ["Heiner Diaz", "Mateo Florez", "Estefania Sanabria"],
-    "rotacion_n2":     ["Estefania Sanabria", "Heiner Diaz", "Mateo Florez"],
-    "fecha_base_n2":   "2026-06-12",
-    "rotacion_n3":     ["Carlos Barrera", "Santiago Amaya", "Adriano Carreño"],
     # Clientes que la Célula 3 rota entre sus 3 encargados. Se usan para LEER el
     # reparto de una semana por nombre de cliente (no por posición de columna), de
     # modo que la lectura aguante cambios de estructura del Excel.
@@ -149,37 +145,6 @@ def siguiente_lunes() -> date:
     hoy = date.today()
     dias = (7 - hoy.weekday()) % 7 or 7          # días hasta el próximo lunes
     return hoy + timedelta(days=dias)
-
-
-def leer_dispo(lunes: date, ruta: str) -> Tuple[Optional[str], Optional[str]]:
-    """Pestaña 'ROTACION DISPO CELULA 3 ' (con espacio final) de la Matriz."""
-    from openpyxl import load_workbook
-    wb = load_workbook(ruta, data_only=True)
-    ws = wb["ROTACION DISPO CELULA 3 "]
-    for row in ws.iter_rows(values_only=True):
-        if len(row) < 5:
-            continue                       # fila sin las 5 columnas esperadas
-        ini, fin, n2, n3 = row[1], row[2], row[3], row[4]
-        if hasattr(ini, "date") and hasattr(fin, "date"):
-            if ini.date() <= lunes <= fin.date():
-                # Preservar None en celdas vacías (str(None) daría el literal "None",
-                # que es truthy y rompería el fallback / mostraría "None" en pantalla).
-                return (str(n2) if n2 is not None else None,
-                        str(n3) if n3 is not None else None)
-    return None, None
-
-
-def calcular_dispo_fallback(lunes: date, cfg: dict) -> str:
-    """Fallback por cálculo cuando no hay Matriz: rota desde una fecha base.
-    Tolera un config corrupto (lista vacía o fecha mal escrita) cayendo a los
-    valores por defecto en vez de reventar con un traceback."""
-    orden = cfg.get("rotacion_n2") or DEFAULT_CFG["rotacion_n2"]
-    try:
-        base = date.fromisoformat(str(cfg.get("fecha_base_n2", "")))
-    except (ValueError, TypeError):
-        base = date.fromisoformat(DEFAULT_CFG["fecha_base_n2"])
-    idx = ((lunes - base).days // 7) % len(orden)
-    return orden[idx]
 
 
 def siguiente_disponible(nombre: str, rotacion: List[str], ausentes: List[str],
@@ -250,7 +215,7 @@ def _guardar_wb(wb, destino) -> None:
         raise
 
 
-def generar_excel(lunes: date, asig: Dict[str, List[str]], n2: str, n3: Optional[str],
+def generar_excel(lunes: date, asig: Dict[str, List[str]],
                   ausentes: List[str], cfg: dict, dir_destino: Path) -> str:
     """Genera el Excel formateado. Lo guarda en `dir_destino` (junto al PMP fuente)."""
     from openpyxl import Workbook
@@ -318,8 +283,6 @@ def generar_excel(lunes: date, asig: Dict[str, List[str]], n2: str, n3: Optional
         fila += 1
 
     for texto, color in [
-        (f"🌙  DISPO NOCTURNA N2 (V-V 10pm–7am): {n2}", "FFC300"),
-        *([(f"🆘  ESCALAMIENTO N3 (cambios / desbordes): {n3}", "F0B27A")] if n3 else []),
         *([(f"⚠️  Ausentes: {', '.join(ausentes)} — revisar reasignación", "E74C3C")] if ausentes else []),
     ]:
         ws.merge_cells(f"A{fila}:{get_column_letter(N)}{fila}")
@@ -340,7 +303,6 @@ def generar_excel(lunes: date, asig: Dict[str, List[str]], n2: str, n3: Optional
     for r_, (k, v) in enumerate([
         ("Semana", f"{lunes.strftime('%d/%m/%Y')} → {fin}"),
         ("Generado el", date.today().strftime("%d/%m/%Y")),
-        ("Dispo N2", n2), ("Dispo N3", n3 or "N/A"),
         ("Ausentes", ", ".join(ausentes) or "Ninguno"),
     ], 2):
         ws2[f"A{r_}"] = k; ws2[f"B{r_}"] = v; ws2[f"A{r_}"].font = fnt(bold=True)
@@ -520,8 +482,7 @@ def auto_detectar_inicio(cfg: dict) -> None:
     # No se abre ningún Excel aquí (el menú debe aparecer al instante): solo se
     # resuelven rutas. La preferencia por el Control con la semana más avanzada se
     # aplica al GENERAR (modo_pmp), que es donde importa.
-    for clave, patron, desc in [("ruta_pmp", "PMP", "Control de Gestión PMP"),
-                                 ("ruta_matriz", "Matriz", "Matriz Unificada")]:
+    for clave, patron, desc in [("ruta_pmp", "PMP", "Control de Gestión PMP")]:
         actual = cfg.get(clave, "")
         if actual and Path(actual).is_file():
             lineas.append(Text.assemble(("✓ ", "green"), (f"{desc}: ", "bold"),
@@ -544,7 +505,7 @@ def auto_detectar_inicio(cfg: dict) -> None:
 
 # ── Preview de la rotación ─────────────────────────────────────────────────────
 def tabla_preview(lunes: date, nuevas: Dict[str, List[str]], ausentes: List[str],
-                  n2: str, n3: Optional[str], fuente_dispo: str, cfg: dict) -> Panel:
+                  cfg: dict) -> Panel:
     largos = set(cfg["clientes_largos"])
     fin = (lunes + timedelta(4)).strftime("%d/%m/%Y")
 
@@ -572,17 +533,12 @@ def tabla_preview(lunes: date, nuevas: Dict[str, List[str]], ausentes: List[str]
             cli_txt = Text("\n").join(partes) if partes else Text("(sin clientes)", style="dim")
         tabla.add_row(ing_cell, horario, cli_txt)
 
-    pie = Text()
-    pie.append("🌙  Dispo N2 (V-V 10pm–7am): ", style="bold")
-    pie.append(f"{n2}", style="yellow")
-    pie.append(f"   [{fuente_dispo}]\n", style="dim")
-    if n3:
-        pie.append("🆘  Escalamiento N3: ", style="bold"); pie.append(f"{n3}\n", style="orange3")
     if ausentes:
-        pie.append("⚠  Ausentes: ", style="bold red")
+        pie = Text("⚠  Ausentes: ", style="bold red")
         pie.append(", ".join(ausentes), style="red")
-
-    cuerpo = Group(tabla, Text(), pie)
+        cuerpo = Group(tabla, Text(), pie)
+    else:
+        cuerpo = Group(tabla)
     return Panel(cuerpo, title=f"👁  Vista previa — semana {lunes.strftime('%d/%m/%Y')} → {fin}",
                  border_style="green", box=box.ROUNDED, padding=(1, 2), expand=False)
 
@@ -597,10 +553,6 @@ def abrir_archivo(ruta: str) -> None:
             subprocess.run(["xdg-open", ruta], check=False)
     except Exception as e:
         console.print(f"  [yellow]⚠[/] No se pudo abrir automáticamente: {e}")
-
-
-def _siguiente_en_rotacion(nombre: str, rotacion: List[str]) -> str:
-    return rotacion[(rotacion.index(nombre) + 1) % len(rotacion)] if nombre in rotacion else nombre
 
 
 def _fecha_excel(d: date) -> datetime:
@@ -1072,129 +1024,12 @@ def actualizar_control_pmp(ruta_pmp: str, lunes: date, ausentes: List[str], cfg:
     return destino
 
 
-def _ultima_fila_dispo(ws) -> Optional[int]:
-    ultima = None
-    for row in range(1, ws.max_row + 1):
-        if hasattr(ws.cell(row, 2).value, "date") and hasattr(ws.cell(row, 3).value, "date"):
-            ultima = row
-    return ultima
-
-
-def cobertura_dispo(ruta_matriz: str) -> Optional[date]:
-    """Último viernes (fin de disponibilidad) cubierto en la Matriz. Sirve para
-    avisar al usuario hasta cuándo está rellena y cuándo tocará extenderla."""
-    from openpyxl import load_workbook
-    try:
-        ws = load_workbook(ruta_matriz, data_only=True)["ROTACION DISPO CELULA 3 "]
-    except Exception:
-        return None
-    fin = None
-    for row in range(1, ws.max_row + 1):
-        c = ws.cell(row, 3).value
-        if hasattr(c, "date") and (fin is None or c.date() > fin):
-            fin = c.date()
-    return fin
-
-
-def asegurar_dispo_en_matriz(ruta_matriz: str, inicio: date, cfg: dict,
-                             salida: Optional[str] = None) -> str:
-    """Asegura que la matriz tenga la fila V-V de `inicio`.
-
-    Si ya existe, solo guarda una copia equivalente. Si falta, agrega filas
-    copiando el formato de la última fila real y rotando N2/N3.
-    """
-    from openpyxl import load_workbook
-
-    wb = load_workbook(ruta_matriz)
-    ws = wb["ROTACION DISPO CELULA 3 "]
-    ultima = _ultima_fila_dispo(ws)
-    if not ultima:
-        raise ValueError("No encontré filas de disponibilidad en la matriz.")
-
-    for row in range(1, ws.max_row + 1):
-        valor = ws.cell(row, 2).value
-        if hasattr(valor, "date") and valor.date() == inicio:
-            destino = salida or str(Path(ruta_matriz).with_name(
-                f"{Path(ruta_matriz).stem}_actualizada_{inicio.strftime('%Y%m%d')}.xlsx"
-            ))
-            _guardar_wb(wb, destino)
-            return destino
-
-    rotacion_n3 = cfg.get("rotacion_n3") or []
-    if not rotacion_n3:
-        rotacion_n3 = []
-        for row in range(1, ws.max_row + 1):
-            nombre = ws.cell(row, 5).value
-            if nombre and nombre not in rotacion_n3:
-                rotacion_n3.append(str(nombre))
-
-    while ws.cell(ultima, 2).value.date() < inicio:
-        nueva = ultima + 1
-        for col in range(2, 6):
-            origen = ws.cell(ultima, col)
-            destino = ws.cell(nueva, col)
-            if origen.has_style:
-                destino._style = copy.copy(origen._style)
-            destino.number_format = origen.number_format
-            destino.font = copy.copy(origen.font)
-            destino.fill = copy.copy(origen.fill)
-            destino.border = copy.copy(origen.border)
-            destino.alignment = copy.copy(origen.alignment)
-            destino.protection = copy.copy(origen.protection)
-        ws.row_dimensions[nueva].height = ws.row_dimensions[ultima].height
-
-        inicio_nuevo = ws.cell(ultima, 3).value.date()
-        ws.cell(nueva, 2).value = _fecha_excel(inicio_nuevo)
-        ws.cell(nueva, 3).value = _fecha_excel(inicio_nuevo + timedelta(days=7))
-        ws.cell(nueva, 4).value = _siguiente_en_rotacion(str(ws.cell(ultima, 4).value), cfg["rotacion_n2"])
-        ws.cell(nueva, 5).value = _siguiente_en_rotacion(str(ws.cell(ultima, 5).value), rotacion_n3)
-        ultima = nueva
-
-    destino = salida or str(Path(ruta_matriz).with_name(
-        f"{Path(ruta_matriz).stem}_actualizada_{inicio.strftime('%Y%m%d')}.xlsx"
-    ))
-    _guardar_wb(wb, destino)
-    return destino
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  4 · MODOS
 # ══════════════════════════════════════════════════════════════════════════════
-def modo_dispo(cfg: dict) -> None:
-    console.print(Panel("🌙  Consulta de disponibilidad nocturna",
-                        border_style="magenta", box=box.ROUNDED, expand=False))
-    lunes = pedir_fecha("Semana a consultar (lunes)", siguiente_lunes())
-
-    n2 = n3 = None
-    fuente = "cálculo automático"
-    ruta_matriz = resolver_ruta(cfg, "ruta_matriz", "Matriz", "Matriz Unificada", requerido=False)
-    if ruta_matriz:
-        with console.status("[cyan]Leyendo Matriz Unificada…", spinner="dots"):
-            try:
-                n2, n3 = leer_dispo(lunes, ruta_matriz)
-                fuente = "Matriz Unificada"
-            except Exception as e:
-                console.print(f"  [yellow]⚠[/] {e}")
-    if not n2:
-        n2 = calcular_dispo_fallback(lunes, cfg)
-
-    fin = (lunes + timedelta(4)).strftime("%d/%m/%Y")
-    cuerpo = Text()
-    cuerpo.append("N2 (incidentes nocturnos) : ", style="bold"); cuerpo.append(f"{n2}\n", style="cyan")
-    cuerpo.append("N3 (escalamiento)         : ", style="bold"); cuerpo.append(f"{n3 or 'N/A'}\n")
-    cuerpo.append("Fuente                    : ", style="bold"); cuerpo.append(fuente, style="dim")
-    if ruta_matriz:
-        cob = cobertura_dispo(ruta_matriz)
-        if cob:
-            cuerpo.append("\nCubierta hasta            : ", style="bold")
-            cuerpo.append(cob.strftime("%d/%m/%Y"), style="dim")
-    console.print(Panel(cuerpo, title=f"🌙  Disponibilidad — {lunes.strftime('%d/%m/%Y')} → {fin}",
-                        border_style="yellow", box=box.ROUNDED, expand=False, padding=(1, 2)))
-
-
 def modo_pmp(cfg: dict) -> None:
     console.print(Panel("📋  Generar semana siguiente\n"
-                        "[dim]Actualiza el Control PMP y la Matriz, y crea el cuadro resumen.[/]",
+                        "[dim]Actualiza el Control PMP y, si quieres, crea el cuadro resumen.[/]",
                         border_style="red", box=box.ROUNDED, expand=False))
 
     # 1 · Resolver archivos primero (para poder sugerir la fecha correcta del Control).
@@ -1215,7 +1050,6 @@ def modo_pmp(cfg: dict) -> None:
     ruta_pmp = resolver_ruta(cfg, "ruta_pmp", "PMP", "Control de Gestión PMP", requerido=True)
     if not ruta_pmp:
         console.print("  [red]✗[/] Sin PMP no se puede generar."); return
-    ruta_matriz = resolver_ruta(cfg, "ruta_matriz", "Matriz", "Matriz Unificada", requerido=False)
 
     # 2 · Fecha AUTOMÁTICA: se detecta la última semana registrada en el Control y se
     #     usa la siguiente. El usuario no escribe fechas; solo confirma. Si necesita
@@ -1257,19 +1091,8 @@ def modo_pmp(cfg: dict) -> None:
         console.print(f"  [yellow]⚠[/] Clientes no ubicados esa semana: "
                       f"{', '.join(faltantes)} — revísalo en la vista previa.")
 
-    # 4c · Rotar (regla determinista) + disponibilidad
+    # 4c · Rotar (regla determinista)
     nuevas = rotar(actuales, ausentes, cfg["rotacion_pmp"], cobertura)
-    n2 = n3 = None
-    fuente_dispo = "cálculo automático"
-    if ruta_matriz:
-        try:
-            n2, n3 = leer_dispo(lunes_sig, ruta_matriz)
-            if n2:
-                fuente_dispo = "Matriz Unificada"
-        except Exception as e:
-            console.print(f"  [yellow]⚠[/] Dispo: {e}")
-    if not n2:
-        n2 = calcular_dispo_fallback(lunes_sig, cfg)
 
     # Mostrar de dónde salió cada cliente (semana de referencia)
     ref = Text(f"Semana de referencia leída: {lunes_act.strftime('%d/%m/%Y')}\n", style="dim")
@@ -1280,15 +1103,14 @@ def modo_pmp(cfg: dict) -> None:
     console.print(ref)
 
     # 5 · PREVIEW + confirmación
-    console.print(tabla_preview(lunes_sig, nuevas, ausentes, n2, n3, fuente_dispo, cfg))
+    console.print(tabla_preview(lunes_sig, nuevas, ausentes, cfg))
     if not confirmar("¿Confirmar y generar la semana siguiente?", default=True):
         console.print("  [dim]Cancelado — no se escribió ningún archivo.[/]"); return
 
-    # 6 · A partir de la MISMA rotación: Control real + Matriz + cuadro resumen.
-    #     El Control y la Matriz se SOBRESCRIBEN sobre su mismo archivo (in-place, sin
-    #     generar copias nuevas): se pasa salida=ruta_* y el guardado es atómico
-    #     (temp + os.replace), así un fallo a mitad no corrompe el archivo. El Control
-    #     es la operación con validaciones: si falla, se aborta sin tocar nada.
+    # 6 · A partir de la rotación: actualizar el Control real (+ cuadro resumen opcional).
+    #     El Control se SOBRESCRIBE sobre su mismo archivo (in-place): se pasa
+    #     salida=ruta_pmp y el guardado es atómico (temp + os.replace), así un fallo a
+    #     mitad no corrompe el archivo. Si la actualización falla, se aborta.
     dir_destino = Path(ruta_pmp).resolve().parent
     try:
         with console.status("[green]Actualizando el Control PMP…", spinner="dots"):
@@ -1298,19 +1120,6 @@ def modo_pmp(cfg: dict) -> None:
         console.print(f"  [red]✗[/] No se pudo actualizar el Control PMP: {e}")
         return
 
-    matriz = None
-    if ruta_matriz:
-        try:
-            with console.status("[green]Actualizando la Matriz de recursos…", spinner="dots"):
-                matriz = asegurar_dispo_en_matriz(ruta_matriz, lunes_sig - timedelta(days=3), cfg,
-                                                  salida=ruta_matriz)
-            cob = cobertura_dispo(matriz or ruta_matriz)
-            if cob:
-                console.print(f"  [dim]🌙 Disponibilidad nocturna cubierta hasta el "
-                              f"{cob.strftime('%d/%m/%Y')}.[/]")
-        except Exception as e:
-            console.print(f"  [yellow]⚠[/] No se pudo actualizar la Matriz (se omite): {e}")
-
     # Cuadro resumen: tabla NUEVA y formateada, aparte, para compartir al equipo.
     # Es opcional (por defecto no): el entregable principal es el Control copiado+rotado.
     resumen = None
@@ -1318,7 +1127,7 @@ def modo_pmp(cfg: dict) -> None:
                  default=False):
         try:
             with console.status("[green]Generando el cuadro resumen…", spinner="dots"):
-                resumen = generar_excel(lunes_sig, nuevas, n2, n3, ausentes, cfg, dir_destino)
+                resumen = generar_excel(lunes_sig, nuevas, ausentes, cfg, dir_destino)
         except Exception as e:
             console.print(f"  [red]✗[/] Error al generar el cuadro resumen: {e}")
             resumen = None
@@ -1326,12 +1135,8 @@ def modo_pmp(cfg: dict) -> None:
     # 7 · Resultado
     fin = (lunes_sig + timedelta(4)).strftime("%d/%m/%Y")
     res = Text()
-    res.append("Semana        : ", style="bold"); res.append(f"{lunes_sig.strftime('%d/%m/%Y')} → {fin}\n")
-    res.append("Dispo N2      : ", style="bold"); res.append(f"{n2}\n", style="yellow")
-    res.append("Dispo N3      : ", style="bold"); res.append(f"{n3 or 'N/A'}\n\n")
+    res.append("Semana        : ", style="bold"); res.append(f"{lunes_sig.strftime('%d/%m/%Y')} → {fin}\n\n")
     res.append("Control PMP   : ", style="bold"); res.append(f"{control}\n", style="cyan")
-    res.append("Matriz        : ", style="bold"); res.append(f"{matriz or 'no actualizada'}\n",
-                                                              style="cyan" if matriz else "dim")
     res.append("Cuadro resumen: ", style="bold"); res.append(f"{resumen or 'no generado'}",
                                                               style="cyan" if resumen else "dim")
     console.print(Panel(res, title="✅  Semana siguiente generada",
@@ -1346,7 +1151,7 @@ def modo_pmp(cfg: dict) -> None:
 
 
 def _config_rutas(cfg: dict) -> None:
-    console.print(Panel(f"📁  Rutas de archivos\n[dim]Se guardan en {CONFIG_PATH}[/]",
+    console.print(Panel(f"📁  Archivo del Control\n[dim]Se guarda en {CONFIG_PATH}[/]",
                         border_style="blue", box=box.ROUNDED, expand=False))
 
     def _editar(clave: str, desc: str, patron: str, requerido: bool) -> None:
@@ -1369,9 +1174,8 @@ def _config_rutas(cfg: dict) -> None:
             _pedir_ruta_manual(cfg, clave, desc, requerido)
 
     _editar("ruta_pmp", "Control de Gestión PMP", "PMP", True)
-    _editar("ruta_matriz", "Matriz Unificada", "Matriz", False)
     guardar_cfg(cfg)
-    console.print("  [green]✓[/] Rutas guardadas.")
+    console.print("  [green]✓[/] Ruta guardada.")
 
 
 def _pedir_nombre(prompt: str) -> str:
@@ -1384,11 +1188,10 @@ _CANCELAR = "↩  cancelar"
 
 
 def _gestionar_personas(cfg: dict, clave: str, titulo: str, es_giro: bool) -> None:
-    """Añadir / quitar / reordenar una lista de consultores (rotación PMP, N2 o N3).
-    El ORDEN importa: en PMP define el giro (cada cliente pasa al SIGUIENTE de la
-    lista); en N2/N3 define la secuencia de turnos. Solo edita la config; los
-    nombres deben coincidir EXACTAMENTE con los del Excel para que la lectura y la
-    rotación funcionen."""
+    """Añadir / quitar / reordenar la lista de consultores de la rotación PMP.
+    El ORDEN importa: define el giro (cada cliente pasa al SIGUIENTE de la lista).
+    Solo edita la config; los nombres deben coincidir EXACTAMENTE con los del Excel
+    para que la lectura y la rotación funcionen."""
     nota = None
     while True:
         banner()                                   # limpia la pantalla: no se apilan paneles
@@ -1537,10 +1340,8 @@ def modo_config(cfg: dict) -> None:
         op = _ask(questionary.select(
             "¿Qué quieres configurar?",
             choices=[
-                questionary.Choice("📁  Rutas de archivos (Control / Matriz)", "rutas"),
+                questionary.Choice("📁  Archivo del Control de Gestión PMP", "rutas"),
                 questionary.Choice("👥  Consultores — rotación PMP (Célula 3)", "pmp"),
-                questionary.Choice("🌙  Consultores — N2 (incidentes nocturnos)", "n2"),
-                questionary.Choice("🌙  Consultores — N3 (escalamiento)", "n3"),
                 questionary.Choice("🧾  Clientes de Célula 3 (rotación + horario)", "cli"),
                 questionary.Choice("↩   Volver al menú", "back"),
             ],
@@ -1551,10 +1352,6 @@ def modo_config(cfg: dict) -> None:
             _config_rutas(cfg)
         elif op == "pmp":
             _gestionar_personas(cfg, "rotacion_pmp", "Rotación PMP (Célula 3)", es_giro=True)
-        elif op == "n2":
-            _gestionar_personas(cfg, "rotacion_n2", "Rotación N2 (incidentes nocturnos)", es_giro=True)
-        elif op == "n3":
-            _gestionar_personas(cfg, "rotacion_n3", "Rotación N3 (escalamiento)", es_giro=True)
         elif op == "cli":
             _gestionar_clientes(cfg)
 
@@ -1571,16 +1368,15 @@ def menu(cfg: dict) -> None:
         primera = False
 
         rutas_ok = bool(cfg.get("ruta_pmp") and Path(cfg["ruta_pmp"]).is_file())
-        estado = "[green]rutas OK ✓[/]" if rutas_ok else "[yellow]configura rutas ⚠[/]"
+        estado = "[green]Control OK ✓[/]" if rutas_ok else "[yellow]configura el Control ⚠[/]"
         console.print(f"  Estado: {estado}\n")
 
         try:
             op = questionary.select(
                 "¿Qué deseas hacer?",
                 choices=[
-                    questionary.Choice("🌙  Consultar disponibilidad nocturna", "1"),
                     questionary.Choice("📋  Generar semana siguiente", "2"),
-                    questionary.Choice("⚙   Configurar (rutas · consultores · clientes)", "3"),
+                    questionary.Choice("⚙   Configurar (Control · consultores · clientes)", "3"),
                     questionary.Choice("🚪  Salir", "0"),
                 ],
                 style=QS, qmark="›", pointer="❯").unsafe_ask()
@@ -1590,7 +1386,7 @@ def menu(cfg: dict) -> None:
         if op in (None, "0"):
             break
 
-        accion = {"1": modo_dispo, "2": modo_pmp, "3": modo_config}.get(op)
+        accion = {"2": modo_pmp, "3": modo_config}.get(op)
         if accion:
             try:
                 console.print()
@@ -1669,23 +1465,6 @@ def _selftest() -> None:
         assert siguiente_lunes_en_pmp(str(pmp)) == date(2026, 6, 29)
         assert diagnostico_fecha(str(pmp), date(2026, 6, 22))[0] is False   # ya existe
         assert diagnostico_fecha(str(pmp), date(2026, 6, 29))[0] is True    # la que falta
-
-        matriz = Path(tmp) / "matriz.xlsx"
-        matriz_out = Path(tmp) / "matriz_out.xlsx"
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "ROTACION DISPO CELULA 3 "
-        ws["B4"] = _fecha_excel(date(2026, 6, 19))
-        ws["C4"] = _fecha_excel(date(2026, 6, 26))
-        ws["D4"] = "Heiner Diaz"
-        ws["E4"] = "Carlos Barrera"
-        wb.save(matriz)
-        asegurar_dispo_en_matriz(str(matriz), date(2026, 6, 26), cfg, str(matriz_out))
-        wb = load_workbook(matriz_out, data_only=False)
-        ws = wb["ROTACION DISPO CELULA 3 "]
-        assert ws["B5"].value.date() == date(2026, 6, 26)
-        assert ws["D5"].value == "Mateo Florez"
-        assert cobertura_dispo(matriz_out) == date(2026, 7, 3)
 
     # ── Estructura NUEVA del Control: tabla-resumen de C3 en la columna L, días en
     #    E/F/H/I/N, dos tablas lado a lado. Verifica lectura por NOMBRE y rotación en

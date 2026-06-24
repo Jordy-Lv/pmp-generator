@@ -1,8 +1,8 @@
 # Guía de uso — PMP Generator
 
 Esta herramienta arma sola el **PMP de la semana siguiente**: actualiza el
-Control, la Matriz de disponibilidad y, si quieres, genera un cuadro resumen para
-compartir. No necesitas instalar nada ni saber de programación. Sigue estos pasos.
+Control de Gestión PMP y, si quieres, genera un cuadro resumen para compartir. No
+necesitas instalar nada ni saber de programación. Sigue estos pasos.
 
 ---
 
@@ -45,27 +45,23 @@ Al abrir se ve un menú. Te mueves con las **flechas ↑ ↓** y eliges con **En
    generar la **siguiente**. Solo tienes que **confirmar con Enter** — ya no
    escribes fechas. (Si alguna vez necesitas otra semana, responde que no y podrás
    indicarla a mano.)
-3. La herramienta busca sola los dos Excel. Si encuentra varios, te deja elegir
-   con las flechas.
+3. La herramienta busca sola el Excel del Control. Si encuentra varios, te deja
+   elegir con las flechas.
 4. Te pregunta si **alguien está ausente** esa semana. Marca con la **barra
    espaciadora** a quien corresponda (o ninguno) y pulsa **Enter**.
    - Si marcas a alguien, te preguntará **quién cubre sus PMP** esa semana y eliges
      entre los presentes (ya no se reasignan a uno automáticamente).
 5. Aparece una **vista previa** de cómo queda la rotación. Revísala.
 6. Confirma con **Enter**. Se actualiza el Control (copiando la semana tal cual y
-   rotando solo a los encargados de Célula 3) y la Matriz de disponibilidad.
+   rotando solo a los encargados de Célula 3).
 7. Al final te pregunta si quieres **además** un **cuadro resumen** aparte para
    compartir al equipo. Es opcional: pulsa Enter para omitirlo.
 
-### Consultar disponibilidad nocturna
-Elige **🌙 Consultar disponibilidad nocturna**, indica la semana, y te muestra
-quién está de N2 (incidentes) y N3 (escalamiento).
-
 ### Cambiar consultores o clientes
 Elige **⚙ Configurar** para abrir un submenú donde puedes:
-- **Consultores** — añadir, quitar o reordenar las rotaciones **PMP** (Célula 3),
-  **N2** y **N3**. En la rotación PMP el **orden** decide el giro (quién pasa los
-  clientes a quién), y la pantalla te muestra ese giro para que lo confirmes.
+- **Consultores** — añadir, quitar o reordenar la rotación **PMP** de Célula 3. El
+  **orden** decide el giro (quién pasa los clientes a quién), y la pantalla te
+  muestra ese giro para que lo confirmes.
 - **Clientes de Célula 3** — añadir o quitar clientes de la tabla y marcar su
   **horario** (mañana/tarde) y si es **"PMP largo"**.
 
@@ -77,12 +73,11 @@ Elige **⚙ Configurar** para abrir un submenú donde puedes:
 
 ## 3. ¿Dónde quedan los archivos?
 
-La herramienta trabaja sobre **un solo archivo**: actualiza tu **Control** y tu
-**Matriz** directamente, sobre el mismo Excel (no crea una copia nueva cada
-semana). Cada semana se añade la siguiente sobre ese mismo archivo.
+La herramienta trabaja sobre **un solo archivo**: actualiza tu **Control**
+directamente, sobre el mismo Excel (no crea una copia nueva cada semana). Cada
+semana se añade la siguiente sobre ese mismo archivo.
 
 - **Control**: se actualiza el mismo `Control_Gestion_PMP....xlsx` que abriste.
-- **Matriz**: se actualiza la misma `Matriz....xlsx`.
 - **Cuadro resumen** (solo si lo pides, para compartir): `PMP_Semana.xlsx` —
   nombre fijo, se reescribe cada vez (no se acumulan copias).
 
@@ -95,8 +90,8 @@ de subirlo a SharePoint.
 
 ## 4. Si algo no sale bien
 
-- **No encuentra los Excel**: entra a **⚙ Configurar → Rutas de archivos** y
-  selecciona los archivos a mano. Quedan recordados para la próxima vez.
+- **No encuentra el Control**: entra a **⚙ Configurar → Archivo del Control** y
+  selecciónalo a mano. Queda recordado para la próxima vez.
 - **Dice que "ya existe un bloque" o que la semana no es la siguiente**: revisa
   que la fecha sea la del lunes correcto, justo la semana posterior a la última
   que ya está en el Control.
