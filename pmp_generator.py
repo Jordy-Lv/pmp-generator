@@ -147,40 +147,60 @@ def siguiente_lunes() -> date:
     return hoy + timedelta(days=dias)
 
 
-def siguiente_disponible(nombre: str, rotacion: List[str], ausentes: List[str],
-                         cobertura: Optional[Dict[str, str]] = None) -> str:
-    """Siguiente consultor en la rotación. Si el siguiente está AUSENTE:
-      · si `cobertura` dice quién lo reemplaza (elegido por el usuario), devuelve ese
-        cubridor;
-      · si no, salta al siguiente disponible (comportamiento por defecto).
+def siguiente_titular(nombre: str, rotacion: List[str]) -> str:
+    """Siguiente consultor en el giro (Mateo→Heiner→Estefania→Mateo). Es la rotación
+    de TITULARIDAD y es PURA: NO tiene en cuenta ausencias. Cada cartera de clientes
+    avanza un puesto cada semana pase lo que pase, de modo que las 3 carteras se
+    mantienen intactas y el reparto entre los 3 consultores nunca se desequilibra.
 
-    Es la ÚNICA regla de rotación del proyecto: la usan tanto `rotar()` (que mueve
-    las carteras en memoria para el cuadro resumen) como `actualizar_control_pmp()`
-    (que renombra los consultores dentro del Control real). Ambos reciben la MISMA
-    `cobertura`, así los dos artefactos rotan idénticos y nunca divergen.
+    Las ausencias se resuelven aparte (cobertura temporal, `cubridor_de`) sin tocar
+    la titularidad: así una ausencia de una semana no descuadra la rotación para
+    siempre, y el ausente recupera su cartera al volver.
     """
     if nombre not in rotacion:
         return nombre
+    return rotacion[(rotacion.index(nombre) + 1) % len(rotacion)]
+
+
+def cubridor_de(titular: str, rotacion: List[str], ausentes: List[str],
+                cobertura: Optional[Dict[str, str]] = None) -> str:
+    """Quién ATIENDE esta semana la cartera cuyo titular es `titular`:
+      · el propio titular, si está presente;
+      · si está ausente, quien diga `cobertura` (elección del usuario) o, en su
+        defecto, el siguiente presente del giro.
+
+    Es solo una sustitución TEMPORAL de una semana: la titularidad NO cambia (la
+    define `siguiente_titular`). Por eso el reparto nunca se desequilibra y, cuando
+    el ausente vuelve, su cartera sigue siendo suya.
+    """
+    if titular not in ausentes:
+        return titular
+    if cobertura and titular in cobertura and cobertura[titular] not in ausentes:
+        return cobertura[titular]
+    if titular not in rotacion:
+        return titular
     n = len(rotacion)
-    sig = (rotacion.index(nombre) + 1) % n
-    if rotacion[sig] in ausentes and cobertura and rotacion[sig] in cobertura:
-        return cobertura[rotacion[sig]]
-    intentos = 0
-    while rotacion[sig] in ausentes and intentos < n:
-        sig = (sig + 1) % n
-        intentos += 1
-    return rotacion[sig]
+    i = rotacion.index(titular)
+    for _ in range(n):
+        i = (i + 1) % n
+        if rotacion[i] not in ausentes:
+            return rotacion[i]
+    return titular            # todos ausentes: nadie puede cubrir
 
 
-def rotar(actuales: Dict[str, List[str]], ausentes: List[str], rotacion: List[str],
-          cobertura: Optional[Dict[str, str]] = None) -> Dict[str, List[str]]:
-    """Mateo→Heiner→Estefania→Mateo. Si el destino está ausente, lo cubre quien diga
-    `cobertura` (elegido por el usuario) o, en su defecto, el siguiente disponible."""
+def rotar(actuales: Dict[str, List[str]], rotacion: List[str]) -> Dict[str, List[str]]:
+    """Gira la TITULARIDAD una semana: cada cartera pasa de su titular actual al
+    siguiente del giro (Mateo→Heiner→Estefania→Mateo), SIN tener en cuenta ausencias.
+    Así las 3 carteras se conservan intactas y el reparto nunca se desequilibra.
+
+    La cobertura de un ausente (quién atiende su cartera esa semana) se calcula aparte
+    con `cubridor_de` y NO altera este resultado: es lo que evita que una ausencia
+    puntual fusione dos carteras y descuadre la rotación de forma permanente."""
     nuevas: Dict[str, List[str]] = {ing: [] for ing in rotacion}
     for ing in rotacion:
         clientes = actuales.get(ing, [])
         if clientes:
-            nuevas[siguiente_disponible(ing, rotacion, ausentes, cobertura)].extend(clientes)
+            nuevas[siguiente_titular(ing, rotacion)].extend(clientes)
     return nuevas
 
 
@@ -215,9 +235,12 @@ def _guardar_wb(wb, destino) -> None:
         raise
 
 
-def generar_excel(lunes: date, asig: Dict[str, List[str]],
-                  ausentes: List[str], cfg: dict, dir_destino: Path) -> str:
-    """Genera el Excel formateado. Lo guarda en `dir_destino` (junto al PMP fuente)."""
+def generar_excel(lunes: date, asig: Dict[str, List[str]], ausentes: List[str],
+                  cobertura: Dict[str, str], cfg: dict, dir_destino: Path) -> str:
+    """Genera el Excel formateado. Lo guarda en `dir_destino` (junto al PMP fuente).
+    `asig` es la asignación por TITULARIDAD; si un titular está ausente, se muestra su
+    cartera marcada con quién la cubre esa semana (cobertura temporal), sin cambiar la
+    titularidad."""
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
@@ -255,13 +278,17 @@ def generar_excel(lunes: date, asig: Dict[str, List[str]],
     for idx, ing in enumerate(rotacion):
         ausente  = ing in ausentes
         clientes = asig.get(ing, [])
+        quien    = cubridor_de(ing, rotacion, ausentes, cobertura) if ausente else ing
+        cubierto = ausente and quien != ing
         cf       = "D5D8DC" if ausente else colores_fila[idx % 2]
         ws.row_dimensions[fila].height = max(32, 18 * max(len(clientes), 1))
 
         horario_display = horario_predominante(clientes, cfg)
 
         ca = ws[f"A{fila}"]
-        ca.value = ing; ca.fill = fill(cf)
+        ca.value = f"{ing} (AUSENTE)\ncubre: {quien}" if cubierto else \
+                   (f"{ing} (AUSENTE)" if ausente else ing)
+        ca.fill = fill(cf)
         ca.font  = fnt(bold=True, color="CC0000" if ausente else "000000")
         ca.alignment = aln("left"); ca.border = br
 
@@ -273,7 +300,8 @@ def generar_excel(lunes: date, asig: Dict[str, List[str]],
             col = get_column_letter(3 + j); cc = ws[f"{col}{fila}"]
             cc.border = br; cc.alignment = aln("left")
             if ausente:
-                cc.value = "\n".join(f"⚠️ {c_} — REASIGNAR" for c_ in clientes) or "—"
+                etiqueta = f" — cubre {quien}" if cubierto else ""
+                cc.value = "\n".join(f"⚠️ {c_}{etiqueta}" for c_ in clientes) or "—"
                 cc.fill = fill("FADBD8"); cc.font = fnt("922B21", True)
             else:
                 lineas = [c_ + (" ⚠️ PMP largo" if c_ in largos else "") for c_ in clientes]
@@ -282,8 +310,13 @@ def generar_excel(lunes: date, asig: Dict[str, List[str]],
                 cc.font  = fnt()
         fila += 1
 
+    cobs = [f"{cubridor_de(a, rotacion, ausentes, cobertura)} cubre a {a}"
+            for a in ausentes if cubridor_de(a, rotacion, ausentes, cobertura) != a]
     for texto, color in [
-        *([(f"⚠️  Ausentes: {', '.join(ausentes)} — revisar reasignación", "E74C3C")] if ausentes else []),
+        *([(f"⚠️  Ausentes: {', '.join(ausentes)}"
+            + (f"  ·  {'  ·  '.join(cobs)}" if cobs else "")
+            + "  ·  la titularidad no cambia (cada quien recupera su cartera al volver)",
+           "E74C3C")] if ausentes else []),
     ]:
         ws.merge_cells(f"A{fila}:{get_column_letter(N)}{fila}")
         cc = ws[f"A{fila}"]
@@ -505,8 +538,9 @@ def auto_detectar_inicio(cfg: dict) -> None:
 
 # ── Preview de la rotación ─────────────────────────────────────────────────────
 def tabla_preview(lunes: date, nuevas: Dict[str, List[str]], ausentes: List[str],
-                  cfg: dict) -> Panel:
+                  cobertura: Dict[str, str], cfg: dict) -> Panel:
     largos = set(cfg["clientes_largos"])
+    rotacion = cfg["rotacion_pmp"]
     fin = (lunes + timedelta(4)).strftime("%d/%m/%Y")
 
     tabla = Table(box=box.SIMPLE_HEAVY, expand=False, show_lines=True,
@@ -515,27 +549,35 @@ def tabla_preview(lunes: date, nuevas: Dict[str, List[str]], ausentes: List[str]
     tabla.add_column("Horario", justify="center")
     tabla.add_column("Clientes asignados")
 
-    for ing in cfg["rotacion_pmp"]:
-        clientes = nuevas.get(ing, [])
-        if ing in ausentes:
-            ing_cell = Text(f"{ing}  (AUSENTE)", style="bold red")
-            cli_txt  = Text("\n".join(f"⚠ {c} — REASIGNAR" for c in clientes) or "—", style="red")
-            horario  = Text("—", style="dim")
+    for ing in rotacion:
+        clientes = nuevas.get(ing, [])           # cartera por TITULARIDAD (no cambia con ausencias)
+        horario  = Text(horario_predominante(clientes, cfg).replace(" (", "\n("))
+        ausente  = ing in ausentes
+        if ausente:
+            quien = cubridor_de(ing, rotacion, ausentes, cobertura)
+            ing_cell = Text(f"{ing}\n(AUSENTE)", style="bold red")
+            if quien != ing:
+                ing_cell.append(f"\n→ cubre {quien}", style="yellow")
         else:
             ing_cell = Text(ing, style="bold")
-            horario  = Text(horario_predominante(clientes, cfg).replace(" (", "\n("))
-            partes = []
-            for c in clientes:
-                t = Text(c)
-                if c in largos:
-                    t.append("  ⚠ PMP largo", style="yellow")
-                partes.append(t)
-            cli_txt = Text("\n").join(partes) if partes else Text("(sin clientes)", style="dim")
+        partes = []
+        for c in clientes:
+            t = Text(f"⚠ {c}" if ausente else c, style="red" if ausente else "")
+            if c in largos:
+                t.append("  ⚠ PMP largo", style="yellow")
+            partes.append(t)
+        cli_txt = Text("\n").join(partes) if partes else Text("(sin clientes)", style="dim")
         tabla.add_row(ing_cell, horario, cli_txt)
 
     if ausentes:
-        pie = Text("⚠  Ausentes: ", style="bold red")
+        pie = Text("⚠  Ausentes esta semana: ", style="bold red")
         pie.append(", ".join(ausentes), style="red")
+        cobs = [f"{cubridor_de(a, rotacion, ausentes, cobertura)} cubre a {a}"
+                for a in ausentes if cubridor_de(a, rotacion, ausentes, cobertura) != a]
+        if cobs:
+            pie.append("\n   " + "  ·  ".join(cobs), style="yellow")
+        pie.append("\n   La titularidad no cambia: cada quien recupera su cartera al volver.",
+                   style="dim")
         cuerpo = Group(tabla, Text(), pie)
     else:
         cuerpo = Group(tabla)
@@ -901,21 +943,21 @@ def _copiar_bloque(ws, fila_origen: int, fila_destino: int, alto: int = 21,
             )
 
 
-def actualizar_control_pmp(ruta_pmp: str, lunes: date, ausentes: List[str], cfg: dict,
-                           salida: Optional[str] = None,
-                           cobertura: Optional[Dict[str, str]] = None) -> str:
+def actualizar_control_pmp(ruta_pmp: str, lunes: date, cfg: dict,
+                           salida: Optional[str] = None) -> str:
     """Copia el último bloque semanal del Control PMP debajo y rota Célula 3.
 
-    No reconstruye la tabla: conserva el formato real de Excel y solo toca el
-    nuevo bloque copiado. La rotación de consultores usa `siguiente_disponible`,
-    la MISMA regla que `rotar()`, de modo que el Control actualizado coincide con
-    el cuadro resumen incluso cuando hay ausentes (el cliente del ausente queda a
-    cargo del siguiente disponible; el aviso visual "REASIGNAR" vive solo en el
-    cuadro resumen). Escribe en `salida` (si se omite, junto al original con sufijo
-    `_actualizado_<fecha>`). En el flujo normal `modo_pmp` pasa `salida=ruta_pmp`,
-    de modo que SOBRESCRIBE el mismo Control in-place; el guardado es atómico
-    (`_guardar_wb`: escribe a un temporal y reemplaza), así un fallo a mitad no deja
-    el archivo a medias.
+    No reconstruye la tabla: conserva el formato real de Excel y solo toca el nuevo
+    bloque copiado. La rotación usa `siguiente_titular` (titularidad PURA, sin
+    ausencias): el Control es el registro oficial del giro, así que siempre refleja
+    la rotación equilibrada y nunca se descuadra. Las ausencias/coberturas de la
+    semana NO se escriben aquí —son una sustitución temporal y viven en el cuadro
+    resumen—, de modo que la lectura de la semana siguiente parte siempre de una
+    titularidad correcta y el ausente recupera su cartera al volver. Escribe en
+    `salida` (si se omite, junto al original con sufijo `_actualizado_<fecha>`). En
+    el flujo normal `modo_pmp` pasa `salida=ruta_pmp`, de modo que SOBRESCRIBE el
+    mismo Control in-place; el guardado es atómico (`_guardar_wb`: escribe a un
+    temporal y reemplaza), así un fallo a mitad no deja el archivo a medias.
     """
     from openpyxl import load_workbook
 
@@ -961,9 +1003,12 @@ def actualizar_control_pmp(ruta_pmp: str, lunes: date, ausentes: List[str], cfg:
                  if str(ws.cell(target_row, c).value or "").strip() == "Consultor"}
 
     # Rotación: por cada fila de datos, si atiende un cliente de Célula 3 se pone el
-    # SIGUIENTE encargado (giro de cfg['rotacion_pmp']) en sus columnas de consultor;
+    # SIGUIENTE titular (giro de cfg['rotacion_pmp']) en sus columnas de consultor;
     # si el cliente NO es de Célula 3, el consultor se deja en blanco (este documento
-    # es solo de C3). Todo lo demás (clientes, horarios, formato) queda idéntico.
+    # es solo de C3). La rotación es de TITULARIDAD pura (sin ausencias): el Control
+    # registra el giro equilibrado y nunca se descuadra; las coberturas temporales se
+    # muestran solo en el cuadro resumen. Todo lo demás (clientes, horarios, formato)
+    # queda idéntico.
     for row in range(target_row + 1, target_row + alto):
         cli_c3 = None
         for c in range(1, ws.max_column + 1):
@@ -971,13 +1016,13 @@ def actualizar_control_pmp(ruta_pmp: str, lunes: date, ausentes: List[str], cfg:
             if isinstance(v, str) and v.strip() in set_c3:
                 cli_c3 = v.strip(); break
         if cli_c3:
-            actual = None                       # encargado de C3 más a la derecha (tabla resumen)
+            actual = None                       # titular de C3 más a la derecha (tabla resumen)
             for c in range(ws.max_column, 0, -1):
                 v = ws.cell(row, c).value
                 if isinstance(v, str) and v.strip() in set_rot:
                     actual = v.strip(); break
             if actual:
-                nuevo = siguiente_disponible(actual, rotacion, ausentes, cobertura)
+                nuevo = siguiente_titular(actual, rotacion)
                 for c in cols_cons:
                     ws.cell(row, c).value = nuevo
         else:
@@ -1091,8 +1136,10 @@ def modo_pmp(cfg: dict) -> None:
         console.print(f"  [yellow]⚠[/] Clientes no ubicados esa semana: "
                       f"{', '.join(faltantes)} — revísalo en la vista previa.")
 
-    # 4c · Rotar (regla determinista)
-    nuevas = rotar(actuales, ausentes, cfg["rotacion_pmp"], cobertura)
+    # 4c · Rotar la titularidad (regla determinista, sin ausencias: el reparto se
+    #      mantiene siempre equilibrado). La cobertura de los ausentes se aplica como
+    #      capa temporal en la vista previa y el cuadro resumen, no en la titularidad.
+    nuevas = rotar(actuales, cfg["rotacion_pmp"])
 
     # Mostrar de dónde salió cada cliente (semana de referencia)
     ref = Text(f"Semana de referencia leída: {lunes_act.strftime('%d/%m/%Y')}\n", style="dim")
@@ -1103,7 +1150,7 @@ def modo_pmp(cfg: dict) -> None:
     console.print(ref)
 
     # 5 · PREVIEW + confirmación
-    console.print(tabla_preview(lunes_sig, nuevas, ausentes, cfg))
+    console.print(tabla_preview(lunes_sig, nuevas, ausentes, cobertura, cfg))
     if not confirmar("¿Confirmar y generar la semana siguiente?", default=True):
         console.print("  [dim]Cancelado — no se escribió ningún archivo.[/]"); return
 
@@ -1114,8 +1161,7 @@ def modo_pmp(cfg: dict) -> None:
     dir_destino = Path(ruta_pmp).resolve().parent
     try:
         with console.status("[green]Actualizando el Control PMP…", spinner="dots"):
-            control = actualizar_control_pmp(ruta_pmp, lunes_sig, ausentes, cfg, salida=ruta_pmp,
-                                             cobertura=cobertura)
+            control = actualizar_control_pmp(ruta_pmp, lunes_sig, cfg, salida=ruta_pmp)
     except Exception as e:
         console.print(f"  [red]✗[/] No se pudo actualizar el Control PMP: {e}")
         return
@@ -1127,7 +1173,7 @@ def modo_pmp(cfg: dict) -> None:
                  default=False):
         try:
             with console.status("[green]Generando el cuadro resumen…", spinner="dots"):
-                resumen = generar_excel(lunes_sig, nuevas, ausentes, cfg, dir_destino)
+                resumen = generar_excel(lunes_sig, nuevas, ausentes, cobertura, cfg, dir_destino)
         except Exception as e:
             console.print(f"  [red]✗[/] Error al generar el cuadro resumen: {e}")
             resumen = None
@@ -1422,26 +1468,40 @@ def _selftest() -> None:
         "Heiner Diaz": ["B"],
         "Estefania Sanabria": ["C"],
     }
-    # Giro Heiner→Mateo→Estefania→Heiner. Con Heiner ausente, su destino salta.
-    rotadas = rotar(actuales, ["Heiner Diaz"], cfg["rotacion_pmp"])
-    assert rotadas["Estefania Sanabria"] == ["A"]       # Mateo→Estefania
-    assert rotadas["Mateo Florez"] == ["B", "C"]         # Heiner→Mateo; Estefania→(Heiner ausente)→Mateo
-    assert rotadas["Heiner Diaz"] == []
+    rot = cfg["rotacion_pmp"]                       # DEFAULT: [Heiner, Mateo, Estefania]
 
-    # siguiente_disponible: la regla única de rotación, sin y con ausentes.
-    rot = cfg["rotacion_pmp"]
-    assert siguiente_disponible("Heiner Diaz", rot, []) == "Mateo Florez"
-    assert siguiente_disponible("Mateo Florez", rot, []) == "Estefania Sanabria"
-    assert siguiente_disponible("Estefania Sanabria", rot, []) == "Heiner Diaz"
-    assert siguiente_disponible("Estefania Sanabria", rot, ["Heiner Diaz"]) == "Mateo Florez"
-    # Cobertura explícita: el destino que sería un ausente lo toma quien diga la
-    # cobertura (elección del usuario), NO el salto automático al siguiente.
-    assert siguiente_disponible("Estefania Sanabria", rot, ["Heiner Diaz"],
-                                {"Heiner Diaz": "Estefania Sanabria"}) == "Estefania Sanabria"
-    rc = rotar({"Mateo Florez": ["A"], "Heiner Diaz": ["B"], "Estefania Sanabria": ["C"]},
-               ["Heiner Diaz"], rot, {"Heiner Diaz": "Estefania Sanabria"})
-    assert rc["Mateo Florez"] == ["B"] and rc["Estefania Sanabria"] == ["A", "C"] \
-        and rc["Heiner Diaz"] == [], rc
+    # Titularidad: rotación PURA (Heiner→Mateo→Estefania→Heiner), ajena a ausencias.
+    assert siguiente_titular("Heiner Diaz", rot) == "Mateo Florez"
+    assert siguiente_titular("Mateo Florez", rot) == "Estefania Sanabria"
+    assert siguiente_titular("Estefania Sanabria", rot) == "Heiner Diaz"
+
+    # rotar() gira la titularidad: cada cartera pasa al siguiente, pase lo que pase.
+    rotadas = rotar(actuales, rot)
+    assert rotadas == {"Heiner Diaz": ["C"], "Mateo Florez": ["B"],
+                       "Estefania Sanabria": ["A"]}, rotadas
+
+    # cubridor_de(): sustitución TEMPORAL si el titular falta; no toca la titularidad.
+    assert cubridor_de("Heiner Diaz", rot, []) == "Heiner Diaz"            # presente → él mismo
+    assert cubridor_de("Heiner Diaz", rot, ["Heiner Diaz"]) == "Mateo Florez"  # ausente → siguiente presente
+    assert cubridor_de("Heiner Diaz", rot, ["Heiner Diaz"],
+                       {"Heiner Diaz": "Estefania Sanabria"}) == "Estefania Sanabria"  # cobertura elegida
+    # Si el cubridor elegido también falta, cae al siguiente presente.
+    assert cubridor_de("Heiner Diaz", rot, ["Heiner Diaz", "Mateo Florez"],
+                       {"Heiner Diaz": "Mateo Florez"}) == "Estefania Sanabria"
+
+    # PROPIEDAD CLAVE (el bug que se corrige): una ausencia NO desequilibra ni se
+    # propaga. La titularidad rota siempre equilibrada porque las ausencias se
+    # resuelven aparte (cubridor_de) y no fusionan carteras. Reproduce el caso real:
+    # un reparto 3-3-4 sigue 3-3-4 al girar —antes, con un ausente, daba 7-3-0 y ese
+    # desbalance rotaba para siempre—.
+    base = {"Mateo Florez":       ["HOMI O", "HOMI S", "Bancoldex"],
+            "Heiner Diaz":        ["Riviera A", "Riviera B", "EMI"],
+            "Estefania Sanabria": ["Nova1", "Nova2", "Accion1", "Accion2"]}
+    estado = base
+    for _ in range(7):                              # varias semanas seguidas
+        estado = rotar(estado, rot)
+        assert sorted(len(v) for v in estado.values()) == [3, 3, 4], estado   # nunca 7-3-0
+        assert sorted(sum(estado.values(), [])) == sorted(sum(base.values(), [])), estado
 
     # Festivos de Colombia (deterministas): los que de hecho aparecen en el Control.
     assert es_festivo(date(2026, 6, 8))     # Corpus Christi (trasladado)
@@ -1506,7 +1566,7 @@ def _selftest() -> None:
         assert _espaciado_bloques(_headers_semana_pmp(load_workbook(ruta)["2026"])) == 12
 
         out = Path(tmp2) / "control_out.xlsx"
-        actualizar_control_pmp(str(ruta), date(2026, 6, 29), [], cfg, str(out))
+        actualizar_control_pmp(str(ruta), date(2026, 6, 29), cfg, str(out))
         ws2 = load_workbook(out, data_only=False)["2026"]
         assert ws2.cell(25, 4).value.date() == date(2026, 6, 29)     # D = lunes nuevo
         assert ws2.cell(25, 14).value.date() == date(2026, 7, 3)     # N = viernes nuevo
@@ -1554,7 +1614,7 @@ def _selftest() -> None:
         wb.save(ruta)
 
         out = Path(tmp3) / "out_fest.xlsx"
-        actualizar_control_pmp(str(ruta), date(2026, 3, 30), [], cfg, str(out))
+        actualizar_control_pmp(str(ruta), date(2026, 3, 30), cfg, str(out))
         wsf = load_workbook(out, data_only=False)["2026"]
         # Bloque nuevo: header en fila 25, datos en 26-27.
         assert wsf.cell(26, 4).value == "HOMI Oracle"   # lun 30/03 no festivo
